@@ -1162,15 +1162,15 @@ class SettingsWindow(ctk.CTkToplevel):
     def __init__(self, parent_widget, app):
         super().__init__(parent_widget)
         self.app = app
-        self.title(f"{APP_NAME} — Settings")
-        self.geometry("600x680")
+        self.title(f"{APP_NAME} — Options & Settings")
+        self.geometry("640x720")
         self.resizable(False, True)
         self.grab_set()
         self.configure(fg_color=BLACK)
         self._build()
 
     def _build(self):
-        ctk.CTkLabel(self, text="Settings",
+        ctk.CTkLabel(self, text="Options & Settings",
                       font=ctk.CTkFont(size=24, weight="bold"), text_color=WHITE).pack(anchor="w", padx=20, pady=(20, 2))
         ctk.CTkLabel(self, text="Changes apply immediately.", text_color=MUTED).pack(anchor="w", padx=20, pady=(0, 12))
 
@@ -1216,12 +1216,12 @@ class SettingsWindow(ctk.CTkToplevel):
         comp = ctk.CTkFrame(scroll, fg_color=PANEL, corner_radius=8)
         comp.pack(fill="x", pady=(4, 12))
         for text, var, key in [
-            ("Keep intermediate PFS image",           self.app.keep_pfs_var,        None),
-            ("Verify output (slower, uses more RAM)", self.app.verify_output_var,    None),
+            ("Keep intermediate PFS image",           self.app.keep_pfs_var,        "keep_pfs"),
+            ("Verify output (slower, uses more RAM)", self.app.verify_output_var,   "verify_output"),
             ("Auto-clear temp folder after success",  self.app.auto_clear_temp_var,  "auto_clear_temp"),
             ("Disable APR/AMPR question",             self.app.disable_ampr_prompt_var, "disable_ampr_prompt"),
             ("Per-game output subfolder (output/GameName/)", self.app.per_game_folder_var, "per_game_folder"),
-            ("Verbose mkpfs output (debug)",          self.app.verbose_var,           None),
+            ("Verbose mkpfs output (debug)",          self.app.verbose_var,          "verbose"),
         ]:
             cb = ctk.CTkCheckBox(comp, text=text, variable=var, fg_color=GREEN,
                                   hover_color=GREEN2, text_color=WHITE)
@@ -1298,14 +1298,17 @@ class SettingsWindow(ctk.CTkToplevel):
         self._section_label(scroll, "USER INTERFACE")
         ui = ctk.CTkFrame(scroll, fg_color=PANEL, corner_radius=8)
         ui.pack(fill="x", pady=(4, 12))
-        for text, var in [
-            ("Show summary popup when done", self.app.summary_popup_var),
-            ("Play sound on completion",     self.app.sound_complete_var),
-            ("Play sound on errors",         self.app.sound_error_var),
-            ("Open output folder when done", self.app.open_output_var),
+        for text, var, key in [
+            ("Show summary popup when done", self.app.summary_popup_var, "summary_popup"),
+            ("Play sound on completion",     self.app.sound_complete_var, "sound_complete"),
+            ("Play sound on errors",         self.app.sound_error_var,    "sound_error"),
+            ("Open output folder when done", self.app.open_output_var,    "open_output"),
         ]:
-            ctk.CTkCheckBox(ui, text=text, variable=var, fg_color=GREEN,
-                             hover_color=GREEN2, text_color=WHITE).pack(anchor="w", padx=14, pady=6)
+            cb = ctk.CTkCheckBox(ui, text=text, variable=var, fg_color=GREEN,
+                                 hover_color=GREEN2, text_color=WHITE)
+            if key:
+                cb.configure(command=lambda k=key, v=var: save_settings({k: v.get()}))
+            cb.pack(anchor="w", padx=14, pady=6)
         theme_row = ctk.CTkFrame(ui, fg_color=PANEL)
         theme_row.pack(fill="x", padx=14, pady=(4, 10))
         ctk.CTkLabel(theme_row, text="Theme:", text_color=WHITE).pack(side="left", padx=(0, 10))
@@ -2651,7 +2654,7 @@ class App:
         self._button(header, "☀ Light / 🌙 Dark", self._toggle_theme, width=150).grid(row=1, column=2, padx=12, sticky="e")
         self._compact_btn = self._button(header, "⊡  Compact", self._toggle_compact, width=90)
         self._compact_btn.grid(row=1, column=3, padx=(0, 4), sticky="e")
-        self._settings_btn = self._button(header, "⚙  Settings", self.open_settings, width=110)
+        self._settings_btn = self._button(header, "⚙  Options & Settings", self.open_settings, width=150)
         self._settings_btn.grid(row=1, column=4, padx=(0, 4), sticky="e")
 
         # ── Variables ────────────────────────────────────────────────────────
@@ -2660,13 +2663,13 @@ class App:
         self.temp_var   = tk.StringVar(value=self._saved_temp)
         self.ampr_var   = tk.StringVar(value=self._saved_ampr_folder)
         self.password_var = tk.StringVar()
-        self.keep_pfs_var = tk.BooleanVar(value=False)
-        self.open_output_var = tk.BooleanVar(value=False)
-        self.summary_popup_var = tk.BooleanVar(value=True)
-        self.sound_complete_var = tk.BooleanVar(value=True)
-        self.sound_error_var = tk.BooleanVar(value=True)
+        self.keep_pfs_var = tk.BooleanVar(value=settings.get("keep_pfs", False))
+        self.open_output_var = tk.BooleanVar(value=settings.get("open_output", False))
+        self.summary_popup_var = tk.BooleanVar(value=settings.get("summary_popup", True))
+        self.sound_complete_var = tk.BooleanVar(value=settings.get("sound_complete", True))
+        self.sound_error_var = tk.BooleanVar(value=settings.get("sound_error", True))
         self.batch_var = tk.BooleanVar(value=False)
-        self.verify_output_var = tk.BooleanVar(value=False)
+        self.verify_output_var = tk.BooleanVar(value=settings.get("verify_output", False))
         self.auto_clear_temp_var  = tk.BooleanVar(value=self._saved_auto_clear_temp)
         self.per_game_folder_var  = tk.BooleanVar(value=self._saved_per_game_folder)
         self.disable_ampr_prompt_var = tk.BooleanVar(value=self._saved_disable_ampr_prompt)
@@ -2677,7 +2680,7 @@ class App:
         # MkPFS 0.0.8 tuning
         self.compression_level_var = tk.IntVar(value=self._saved_compression_level)
         self.cpu_count_var         = tk.IntVar(value=self._saved_cpu_count)
-        self.verbose_var           = tk.BooleanVar(value=False)
+        self.verbose_var           = tk.BooleanVar(value=settings.get("verbose", False))
         self.block_size_var        = tk.StringVar(value=self._saved_block_size)
         self._compact_mode         = False
 
@@ -2728,9 +2731,10 @@ class App:
         content.grid_columnconfigure(2, weight=2)   # right: game details + cmd
         content.grid_rowconfigure(0, weight=1)
 
-        # ── Left: Queue + Options ────────────────────────────────────────────
+        # ── Left: Queue ──────────────────────────────────────────────────────
         left = self.panel(content, row=0, column=0, sticky="nsew", padx=(0, 10))
         left.grid_columnconfigure(0, weight=1)
+        left.grid_rowconfigure(1, weight=1)
 
         ctk.CTkLabel(left, text="QUEUE", font=ctk.CTkFont(size=16, weight="bold"),
                       text_color=WHITE).grid(row=0, column=0, sticky="w", padx=14, pady=(14, 4))
@@ -2738,8 +2742,9 @@ class App:
         # Queue listbox — tk.Listbox for native single-row selection
         lb_frame = ctk.CTkFrame(left, fg_color=CARD, corner_radius=6,
                                  border_width=1, border_color=BORDER)
-        lb_frame.grid(row=1, column=0, sticky="ew", padx=14, pady=(0, 0))
+        lb_frame.grid(row=1, column=0, sticky="nsew", padx=14, pady=(0, 0))
         lb_frame.grid_columnconfigure(0, weight=1)
+        lb_frame.grid_rowconfigure(0, weight=1)
 
         _lb_bg   = "#111111"
         _lb_fg   = "#e8e8e8"
@@ -2752,7 +2757,7 @@ class App:
             font=("Consolas", 11),
             borderwidth=0, highlightthickness=0,
             activestyle="none", relief="flat",
-            height=7,
+            height=14,
             exportselection=False,
         )
         lb_scrollbar = tk.Scrollbar(lb_frame, orient="vertical",
@@ -2833,61 +2838,22 @@ class App:
             m.tk_popup(event.x_root, event.y_root)
         _pw_entry.bind("<Button-3>", _pw_right_click)
 
-        # ── row 9: Options ────────────────────────────────────────────────────
-        ctk.CTkLabel(left, text="OPTIONS", font=ctk.CTkFont(size=16, weight="bold"),
-                      text_color=WHITE).grid(row=9, column=0, sticky="w", padx=14, pady=(10, 6))
-        opts = ctk.CTkFrame(left, fg_color=PANEL)
-        opts.grid(row=10, column=0, sticky="ew", padx=14, pady=(0, 10))
-        for textv, var, key in [
-            ("Open output folder when done",       self.open_output_var,      None),
-            ("Show summary popup",                 self.summary_popup_var,    None),
-            ("Play sound on completion",           self.sound_complete_var,   None),
-            ("Play sound on errors",               self.sound_error_var,      None),
-            ("Disable APR/AMPR question",          self.disable_ampr_prompt_var, "disable_ampr_prompt"),
-            ("Disable compat share popups",        self.disable_compat_prompts_var, "disable_compat_prompts"),
-            ("Check updates on startup",           self.check_updates_startup_var, "check_updates_startup"),
-            ("Offline mode (no network)",          self.offline_mode_var,     "offline_mode"),
-            ("Keep intermediate PFS",              self.keep_pfs_var,         None),
-            ("Verify Output (Slower, Uses More RAM)", self.verify_output_var, None),
-            ("Auto-clear temp after success",      self.auto_clear_temp_var,  "auto_clear_temp"),
-            ("Verbose mkpfs output (debug)",       self.verbose_var,          None),
-        ]:
-            cb = ctk.CTkCheckBox(opts, text=textv, variable=var, fg_color=GREEN, hover_color=GREEN2,
-                                 text_color=WHITE)
-            if key:
-                cb.configure(command=lambda k=key, v=var: save_settings({k: v.get()}))
-            cb.pack(anchor="w", pady=2)
+        # ── row 9: Options & Settings button ──────────────────────────────────
+        opt_box = ctk.CTkFrame(left, fg_color=CARD, corner_radius=8, border_width=1, border_color=BORDER)
+        opt_box.grid(row=9, column=0, sticky="ew", padx=14, pady=(14, 10))
+        opt_box.grid_columnconfigure(0, weight=1)
 
-        name_row = ctk.CTkFrame(opts, fg_color="transparent")
-        name_row.pack(fill="x", padx=4, pady=(6, 2))
-        ctk.CTkLabel(name_row, text="Output name:", text_color=WHITE,
-                     font=ctk.CTkFont(size=12)).pack(side="left", padx=(0, 8))
-        ctk.CTkOptionMenu(
-            name_row,
-            values=["Title ID", "Game Name"],
-            variable=self.naming_format_var,
-            fg_color=CARD,
-            button_color=GREEN,
-            button_hover_color=GREEN2,
-            text_color=WHITE,
-            width=130,
-            command=lambda v: [save_settings({"naming_format": v}), self.update_command_preview()]
-        ).pack(side="left")
+        self._button(
+            opt_box, "⚙  Options & Settings", self.open_settings,
+            height=36
+        ).pack(fill="x", padx=10, pady=(10, 6))
 
-        ctk.CTkButton(
-            opts,
-            text="🌐  Compat Database (Google Sheet)",
-            fg_color=CARD2,
-            hover_color=BORDER2,
-            text_color=WHITE,
-            font=ctk.CTkFont(size=11),
-            command=lambda: __import__("webbrowser").open(COMMUNITY_SHEET_URL)
-        ).pack(fill="x", padx=4, pady=(6, 4))
-
-        ctk.CTkLabel(opts,
-                      text="  FOLDER button detects single games and multi-dump parent folders.",
-                      text_color=MUTED, font=ctk.CTkFont(size=11),
-                      justify="left").pack(anchor="w", padx=4, pady=(4, 6))
+        ctk.CTkLabel(
+            opt_box,
+            text="Configure compression, output naming, paths,\nprivacy, sound & plugin updates.",
+            text_color=MUTED, font=ctk.CTkFont(size=11),
+            justify="center"
+        ).pack(fill="x", padx=10, pady=(0, 10))
 
         # ── Center: Progress + Stages ────────────────────────────────────────
         center = ctk.CTkFrame(content, fg_color=BLACK)
