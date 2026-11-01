@@ -1262,10 +1262,15 @@ class SettingsWindow(ctk.CTkToplevel):
                       text_color=("#1a7a40", "#4ade80")).pack(anchor="w", pady=(10, 4))
 
     def _browse_folder(self, var, settings_key, title):
-        p = filedialog.askdirectory(title=title)
+        initial = self.app._get_browse_initialdir(var.get())
+        kwargs = {"title": title}
+        if initial:
+            kwargs["initialdir"] = initial
+        p = filedialog.askdirectory(**kwargs)
         if p:
             var.set(p)
             save_settings({settings_key: p})
+            self.app._remember_browse_dir(p)
 
 
 # ─── Archive Extractor ─────────────────────────────────────────────────────────
@@ -3739,11 +3744,56 @@ v1.0
                 self.log("WARN", f"Dropped path not found: {p}")
 
     # ── Folder browse ─────────────────────────────────────────────────────────
+    def _get_browse_initialdir(self, current_path: str = "") -> str | None:
+        """Return an existing directory to open the file dialog in:
+        1. If current_path is set and exists (or its parent exists), use it.
+        2. Else if a folder was previously picked during this session or saved, use it.
+        3. Else return None (allowing Windows Common Dialog to use its native last location).
+        """
+        if current_path:
+            try:
+                p = Path(str(current_path).strip().strip('"').strip("'"))
+                if p.is_dir():
+                    return str(p)
+                if p.parent and p.parent.is_dir():
+                    return str(p.parent)
+            except Exception:
+                pass
+        last = getattr(self, "_last_browse_dir", "")
+        if last:
+            try:
+                if Path(last).is_dir():
+                    return str(last)
+            except Exception:
+                pass
+        try:
+            saved = load_settings().get("last_browse_dir", "")
+            if saved and Path(saved).is_dir():
+                return str(saved)
+        except Exception:
+            pass
+        return None
+
+    def _remember_browse_dir(self, picked_path: str | Path):
+        try:
+            p = Path(picked_path)
+            folder = p if p.is_dir() else p.parent
+            if folder and folder.is_dir():
+                self._last_browse_dir = str(folder)
+                save_settings({"last_browse_dir": str(folder)})
+        except Exception:
+            pass
+
     def browse_source_folder(self):
         """Folder picker — single game folder or parent folder containing multiple dumps."""
-        path = filedialog.askdirectory(title="Select PS5 game folder or parent folder")
+        initial = self._get_browse_initialdir(self.source_var.get())
+        kwargs = {"title": "Select PS5 game folder or parent folder"}
+        if initial:
+            kwargs["initialdir"] = initial
+        path = filedialog.askdirectory(**kwargs)
         if not path:
             return
+        self._remember_browse_dir(path)
         p = Path(path)
         self.source_var.set(str(p))
         if not self.output_var.get():
@@ -3755,9 +3805,10 @@ v1.0
 
     def browse_source_archive(self):
         """File picker — select a .zip / .rar / .7z archive, .exfat, or .ffpkg disk image."""
-        path = filedialog.askopenfilename(
-            title="Select archive or disk image",
-            filetypes=[
+        initial = self._get_browse_initialdir(self.source_var.get())
+        kwargs = {
+            "title": "Select archive or disk image",
+            "filetypes": [
                 ("Supported files", "*.zip *.rar *.7z *.exfat *.ffpkg"),
                 ("Disk images",     "*.exfat *.ffpkg"),
                 ("Archives",        "*.zip *.rar *.7z"),
@@ -3766,9 +3817,13 @@ v1.0
                 ("7-Zip",           "*.7z"),
                 ("All files",       "*.*"),
             ]
-        )
+        }
+        if initial:
+            kwargs["initialdir"] = initial
+        path = filedialog.askopenfilename(**kwargs)
         if not path:
             return
+        self._remember_browse_dir(path)
         p = Path(path)
         self.source_var.set(str(p))
         if not self.output_var.get():
@@ -3778,8 +3833,13 @@ v1.0
         self.add_source_to_queue()
 
     def browse_output_folder(self):
-        p = filedialog.askdirectory(title="Select output folder")
+        initial = self._get_browse_initialdir(self.output_var.get())
+        kwargs = {"title": "Select output folder"}
+        if initial:
+            kwargs["initialdir"] = initial
+        p = filedialog.askdirectory(**kwargs)
         if p:
+            self._remember_browse_dir(p)
             self.output_var.set(p)
             if not self.temp_var.get():
                 self.temp_var.set(str(Path(p) / "_ffpfsc_temp"))
@@ -3787,8 +3847,13 @@ v1.0
             self.update_command_preview()
 
     def browse_temp_folder(self):
-        p = filedialog.askdirectory(title="Select temp folder")
+        initial = self._get_browse_initialdir(self.temp_var.get())
+        kwargs = {"title": "Select temp folder"}
+        if initial:
+            kwargs["initialdir"] = initial
+        p = filedialog.askdirectory(**kwargs)
         if p:
+            self._remember_browse_dir(p)
             tp = str(Path(p) / "_ffpfsc_temp")
             self.temp_var.set(tp)
             save_settings({"temp_folder": tp})
