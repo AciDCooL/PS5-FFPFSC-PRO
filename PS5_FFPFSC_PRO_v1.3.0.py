@@ -1241,6 +1241,27 @@ class SettingsWindow(ctk.CTkToplevel):
         ctk.CTkButton(theme_row, text="Toggle Dark / Light", fg_color=CARD2, text_color=WHITE,
                        hover_color=("#b0b0b0", "#2a2a2a"), width=160, command=self.app._toggle_theme).pack(side="left")
 
+        # NETWORK & PRIVACY
+        self._section_label(scroll, "NETWORK & PRIVACY")
+        net = ctk.CTkFrame(scroll, fg_color=PANEL, corner_radius=8)
+        net.pack(fill="x", pady=(4, 12))
+        for text, var, key in [
+            ("Check for updates on startup",                     self.app.check_updates_startup_var, "check_updates_startup"),
+            ("Disable compatibility share popups & reminders",   self.app.disable_compat_prompts_var, "disable_compat_prompts"),
+            ("Strict offline mode (block all network callbacks)", self.app.offline_mode_var, "offline_mode"),
+        ]:
+            cb = ctk.CTkCheckBox(net, text=text, variable=var, fg_color=GREEN,
+                                  hover_color=GREEN2, text_color=WHITE)
+            if key:
+                cb.configure(command=lambda k=key, v=var: save_settings({k: v.get()}))
+            cb.pack(anchor="w", padx=14, pady=6)
+
+        _net_btns = ctk.CTkFrame(net, fg_color="transparent")
+        _net_btns.pack(anchor="w", padx=10, pady=(4, 10))
+        ctk.CTkButton(_net_btns, text="🌐  Open Compat Database (Google Sheet)", fg_color=CARD2, text_color=WHITE,
+                       hover_color=("#b0b0b0", "#2a2a2a"),
+                       command=lambda: __import__("webbrowser").open(COMMUNITY_SHEET_URL)).pack(side="left")
+
         # ABOUT
         self._section_label(scroll, "ABOUT")
         about = ctk.CTkFrame(scroll, fg_color=PANEL, corner_radius=8)
@@ -2434,16 +2455,18 @@ class App:
         if is_first_run():
             self.root.after(200, self._show_first_run_wizard)
 
-        # After the UI is fully loaded, remind user to report any untested games
-        self.root.after(4000, self._check_pending_compat_reports)
+        # After the UI is fully loaded, remind user to report any untested games (unless opted out)
+        if not self._saved_disable_compat_prompts and not self._saved_offline_mode:
+            self.root.after(4000, self._check_pending_compat_reports)
 
         # Warn if saved folder paths were cleared because they no longer exist
         if getattr(self, "_stale_paths", []):
             self.root.after(800, self._warn_stale_paths)
 
-        # Silent update check on startup — only shows dialog if a newer version exists
+        # Update check on startup — only runs if enabled and not in offline mode
         self.root.after(600,  self._show_whats_new)
-        self.root.after(3000, lambda: self._check_for_updates(silent=True))
+        if self._saved_check_updates_startup and not self._saved_offline_mode:
+            self.root.after(3000, lambda: self._check_for_updates(silent=True))
 
     def _setup(self):
         ctk.set_appearance_mode("dark")
@@ -2476,6 +2499,9 @@ class App:
         self._saved_per_game_folder = settings.get("per_game_folder", False)
         self._saved_auto_clear_temp = settings.get("auto_clear_temp", False)
         self._saved_disable_ampr_prompt = settings.get("disable_ampr_prompt", False)
+        self._saved_check_updates_startup = settings.get("check_updates_startup", True)
+        self._saved_disable_compat_prompts = settings.get("disable_compat_prompts", settings.get("skip_compat_reminder", False))
+        self._saved_offline_mode    = settings.get("offline_mode", False)
         self._saved_naming_format   = settings.get("naming_format", "Title ID")
         self._saved_compression_level = settings.get("compression_level", 9)
         self._saved_cpu_count = settings.get("cpu_count", 0)
@@ -2563,6 +2589,9 @@ class App:
         self.auto_clear_temp_var  = tk.BooleanVar(value=self._saved_auto_clear_temp)
         self.per_game_folder_var  = tk.BooleanVar(value=self._saved_per_game_folder)
         self.disable_ampr_prompt_var = tk.BooleanVar(value=self._saved_disable_ampr_prompt)
+        self.check_updates_startup_var = tk.BooleanVar(value=self._saved_check_updates_startup)
+        self.disable_compat_prompts_var = tk.BooleanVar(value=self._saved_disable_compat_prompts)
+        self.offline_mode_var        = tk.BooleanVar(value=self._saved_offline_mode)
         self.naming_format_var    = tk.StringVar(value=self._saved_naming_format)
         # MkPFS 0.0.8 tuning
         self.compression_level_var = tk.IntVar(value=self._saved_compression_level)
@@ -2734,6 +2763,9 @@ class App:
             ("Play sound on completion",           self.sound_complete_var,   None),
             ("Play sound on errors",               self.sound_error_var,      None),
             ("Disable APR/AMPR question",          self.disable_ampr_prompt_var, "disable_ampr_prompt"),
+            ("Disable compat share popups",        self.disable_compat_prompts_var, "disable_compat_prompts"),
+            ("Check updates on startup",           self.check_updates_startup_var, "check_updates_startup"),
+            ("Offline mode (no network)",          self.offline_mode_var,     "offline_mode"),
             ("Keep intermediate PFS",              self.keep_pfs_var,         None),
             ("Verify Output (Slower, Uses More RAM)", self.verify_output_var, None),
             ("Auto-clear temp after success",      self.auto_clear_temp_var,  "auto_clear_temp"),
@@ -2760,6 +2792,16 @@ class App:
             width=130,
             command=lambda v: [save_settings({"naming_format": v}), self.update_command_preview()]
         ).pack(side="left")
+
+        ctk.CTkButton(
+            opts,
+            text="🌐  Compat Database (Google Sheet)",
+            fg_color=CARD2,
+            hover_color=BORDER2,
+            text_color=WHITE,
+            font=ctk.CTkFont(size=11),
+            command=lambda: __import__("webbrowser").open(COMMUNITY_SHEET_URL)
+        ).pack(fill="x", padx=4, pady=(6, 4))
 
         ctk.CTkLabel(opts,
                       text="  FOLDER button detects single games and multi-dump parent folders.",
@@ -3183,7 +3225,7 @@ class App:
         self._compat_notes_box.grid(row=8, column=1, sticky="ew", padx=(4, 12), pady=(6, 4))
 
         # ── Share to community checkbox ───────────────────────────────────────
-        self._compat_share_var = tk.BooleanVar(value=True)
+        self._compat_share_var = tk.BooleanVar(value=False)
         share_row = ctk.CTkFrame(form_outer, fg_color="transparent")
         share_row.grid(row=9, column=0, columnspan=2, sticky="ew", padx=12, pady=(4, 0))
         ctk.CTkCheckBox(share_row, text="Share anonymously to community database",
@@ -3899,6 +3941,13 @@ v1.0
             pass
 
     def _check_for_updates(self, silent: bool = False):
+        if getattr(self, "offline_mode_var", None) and self.offline_mode_var.get():
+            if not silent:
+                self.root.after(0, lambda: messagebox.showinfo(
+                    "Offline Mode",
+                    "Offline mode is currently enabled. Outbound network requests are disabled."
+                ))
+            return
         import urllib.request as _ur
         import json as _json
         import threading
@@ -5349,13 +5398,22 @@ v1.0
         # Center at fixed size — no deferred resize that fights CTk layout
         _sw = win.winfo_screenwidth()
         _sh = win.winfo_screenheight()
-        _w, _h = 540, 440
+        _w, _h = 540, 460
         win.geometry(f"{_w}x{_h}+{(_sw-_w)//2}+{max(40,(_sh-_h)//2)}")
 
         _win_alive = [True]   # mutable flag — thread checks before touching widgets
 
+        dont_ask_var = tk.BooleanVar(value=False)
+        def _on_dont_ask():
+            if dont_ask_var.get():
+                self.disable_compat_prompts_var.set(True)
+                save_settings({"disable_compat_prompts": True, "skip_compat_reminder": True})
+
         def _close():
             _win_alive[0] = False
+            if dont_ask_var.get():
+                self.disable_compat_prompts_var.set(True)
+                save_settings({"disable_compat_prompts": True, "skip_compat_reminder": True})
             try:
                 win.destroy()
             except Exception:
@@ -5383,6 +5441,14 @@ v1.0
         btn_row = ctk.CTkFrame(win, fg_color="transparent")
         btn_row.pack(side="bottom", fill="x", padx=20, pady=(4, 16))
 
+        dont_ask_cb = ctk.CTkCheckBox(
+            win, text="Don't ask again after compression",
+            variable=dont_ask_var, command=_on_dont_ask,
+            font=ctk.CTkFont(size=11), text_color=MUTED,
+            fg_color=GREEN, hover_color=GREEN2, border_color=BORDER2
+        )
+        dont_ask_cb.pack(side="bottom", anchor="w", padx=20, pady=(0, 4))
+
         status_lbl = ctk.CTkLabel(win, text="", text_color=MUTED, font=ctk.CTkFont(size=11))
         status_lbl.pack(side="bottom", anchor="w", padx=20)
 
@@ -5394,6 +5460,9 @@ v1.0
                        command=_close).pack(side="left", expand=True, fill="x", padx=(6, 0))
 
         def _send():
+            if dont_ask_var.get():
+                self.disable_compat_prompts_var.set(True)
+                save_settings({"disable_compat_prompts": True, "skip_compat_reminder": True})
             import datetime
             report = {
                 "game_title":      item.name,
@@ -5518,8 +5587,12 @@ v1.0
 
     def _check_pending_compat_reports(self):
         """On startup: find history entries with no community report and prompt the user."""
+        if getattr(self, "disable_compat_prompts_var", None) and self.disable_compat_prompts_var.get():
+            return
+        if getattr(self, "offline_mode_var", None) and self.offline_mode_var.get():
+            return
         settings = load_settings()
-        if settings.get("skip_compat_reminder", False):
+        if settings.get("skip_compat_reminder", False) or settings.get("disable_compat_prompts", False):
             return
         history  = load_history()
         reported = {r.get("title_id", "").strip().upper() for r in load_compat()}
@@ -5625,7 +5698,10 @@ v1.0
                         self.log("OK", f"Compat report sent: {r['game_title']} — {r['status']}")
                     except Exception as e:
                         self.log("WARN", f"Community share failed (saved locally): {e}")
-                threading.Thread(target=_post, daemon=True).start()
+                if not (getattr(self, "offline_mode_var", None) and self.offline_mode_var.get()):
+                    threading.Thread(target=_post, daemon=True).start()
+                else:
+                    self.log("OK", f"Compat report saved locally (offline mode active): {r['game_title']} — {r['status']}")
                 submitted += 1
             self.refresh_compat_list()
             win.destroy()
@@ -5635,7 +5711,10 @@ v1.0
         def _dont_ask():
             s = load_settings()
             s["skip_compat_reminder"] = True
+            s["disable_compat_prompts"] = True
             save_settings(s)
+            if hasattr(self, "disable_compat_prompts_var"):
+                self.disable_compat_prompts_var.set(True)
             win.destroy()
 
         btn_row = ctk.CTkFrame(win, fg_color="transparent")
@@ -5717,7 +5796,8 @@ v1.0
         self._compat_notes_box.delete("1.0", "end")
 
         # ── Optionally share to community Google Sheet ────────────────────────
-        if getattr(self, "_compat_share_var", None) and self._compat_share_var.get():
+        if (getattr(self, "_compat_share_var", None) and self._compat_share_var.get()
+                and not (getattr(self, "offline_mode_var", None) and self.offline_mode_var.get())):
             self._compat_share_status.configure(text="✓ Saved!  ⏳ Sending to community…", text_color=YELLOW)
             def _post():
                 import urllib.request as _ur, json as _js
@@ -5747,7 +5827,8 @@ v1.0
                 self.root.after(30000, lambda: self._compat_share_status.configure(text=""))
             threading.Thread(target=_post, daemon=True).start()
         else:
-            self.log("OK", f"Report saved locally (community share unchecked): {title or tid}")
+            reason = "offline mode active" if (getattr(self, "offline_mode_var", None) and self.offline_mode_var.get()) else "community share unchecked"
+            self.log("OK", f"Report saved locally ({reason}): {title or tid}")
 
     def refresh_compat_list(self):
         reports = load_compat()
@@ -5835,6 +5916,14 @@ v1.0
 
     def fetch_community_list(self):
         """Fetch the community compatibility list from the Google Sheet in a background thread."""
+        if getattr(self, "offline_mode_var", None) and self.offline_mode_var.get():
+            self._compat_count_var.set("Offline")
+            self.compat_box.configure(state="normal")
+            self.compat_box.delete("1.0", "end")
+            self.compat_box.insert("end", "Offline mode is enabled. Outbound network requests are disabled.\n\n"
+                                          "You can view your local reports using '⟳ Local'.")
+            self.compat_box.configure(state="disabled")
+            return
         import urllib.request as _ur
         import json as _json
         import threading
@@ -6318,8 +6407,10 @@ v1.0
                         if self.summary_popup_var.get():
                             self.show_summary_popup()
 
-                # Prompt user to share compatibility data (skip during batch — too many popups)
-                if not getattr(self, '_batch_running', False):
+                # Prompt user to share compatibility data (skip during batch or if opted out)
+                if (not getattr(self, '_batch_running', False)
+                        and not self.disable_compat_prompts_var.get()
+                        and not self.offline_mode_var.get()):
                     self.root.after(400, lambda: self._prompt_compat_share(completed_item, _final_sz))
             else:
                 # Auto-retry on OOM: if MemoryError was detected and cpu_count > 1,
