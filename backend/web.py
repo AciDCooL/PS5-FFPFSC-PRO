@@ -853,7 +853,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       document.getElementById('set_keep_pfs').checked = !!s.keep_pfs;
       document.getElementById('set_verify_output').checked = !!s.verify_output;
       document.getElementById('set_auto_clear_temp').checked = !!s.auto_clear_temp;
-      document.getElementById('set_disable_ampr_prompt').checked = !!s.disable_ampr_prompt;
+      document.getElementById('set_disable_ampr_prompt').checked = (s.disable_ampr_prompt !== undefined) ? !!s.disable_ampr_prompt : true;
       document.getElementById('set_per_game_folder').checked = !!s.per_game_folder;
       document.getElementById('set_verbose').checked = !!s.verbose;
       document.getElementById('set_offline_mode').checked = !!s.offline_mode;

@@ -2628,7 +2628,7 @@ class App:
         self._saved_ampr_folder     = settings.get("ampr_folder", "")
         self._saved_per_game_folder = settings.get("per_game_folder", False)
         self._saved_auto_clear_temp = settings.get("auto_clear_temp", False)
-        self._saved_disable_ampr_prompt = settings.get("disable_ampr_prompt", False)
+        self._saved_disable_ampr_prompt = settings.get("disable_ampr_prompt", True)
         self._saved_check_updates_startup = settings.get("check_updates_startup", True)
         self._saved_disable_compat_prompts = settings.get("disable_compat_prompts", settings.get("skip_compat_reminder", False))
         self._saved_offline_mode    = settings.get("offline_mode", False)
@@ -5038,12 +5038,10 @@ v1.0
         self.log("INFO", f"── Batch auto-advance: game {current}/{self._batch_total} — {item.name}")
         self.cancel_requested = False
 
-        # APR handling — ask if not auto-detected, then ensure emu folder is set
+        # APR handling — NEVER prompt in batch auto-advance!
+        # Auto-detection via playgo-chunk.dat or manual queue toggle is respected.
         if item.path and item.path.is_dir():
-            if not getattr(item, "ampr_emu", False) and not getattr(item, "_ampr_asked", False):
-                item._ampr_asked = True
-                if not self.disable_ampr_prompt_var.get() and self._ask_is_apr(item):
-                    item.ampr_emu = True
+            item._ampr_asked = True
             if getattr(item, "ampr_emu", False):
                 self._ensure_ampr_folder()
                 self._update_ampr_status(item)
@@ -5185,6 +5183,14 @@ v1.0
 
     def _ask_is_apr(self, item: "GameItem") -> bool:
         """Ask if this game is APR/AMPR when auto-detection found nothing."""
+        # Unattended / batch guards — NEVER prompt during batch or queue processing
+        if getattr(self, "disable_ampr_prompt_var", None) and self.disable_ampr_prompt_var.get():
+            return False
+        if (getattr(self, "_batch_running", False)
+                or len(self.queue) > 1
+                or (getattr(self, "batch_var", None) and self.batch_var.get())):
+            return False
+
         result = [False]
         win = ctk.CTkToplevel(self.root)
         win.title("APR / AMPR Game?")
@@ -5243,6 +5249,13 @@ v1.0
         """If AMPR emu folder isn't set, prompt the user to pick it. Returns True if ready."""
         if self._ampr_folder():
             return True
+
+        # Unattended / batch guard — NEVER open modal dialog while queue/batch is running
+        if (getattr(self, "_batch_running", False)
+                or len(self.queue) > 1
+                or (getattr(self, "disable_ampr_prompt_var", None) and self.disable_ampr_prompt_var.get())):
+            self.log("WARN", "AMPR: emu folder not configured; skipping AMPR file injection for unattended batch item.")
+            return False
 
         result = [False]
         win = ctk.CTkToplevel(self.root)
@@ -5367,12 +5380,20 @@ v1.0
             messagebox.showerror("Cannot start", str(e))
             return
 
-        # APR handling — ask if not auto-detected, then ensure emu folder is set
+        is_batch = len(self.queue) > 1 or self.batch_var.get() or getattr(self, "_batch_running", False)
+
+        # APR handling — only prompt if single game, not in batch mode, and prompt not disabled
         if item.path and item.path.is_dir():
-            if not getattr(item, "ampr_emu", False) and not getattr(item, "_ampr_asked", False):
+            if (not getattr(item, "ampr_emu", False)
+                    and not getattr(item, "_ampr_asked", False)
+                    and not is_batch
+                    and not self.disable_ampr_prompt_var.get()):
                 item._ampr_asked = True
-                if not self.disable_ampr_prompt_var.get() and self._ask_is_apr(item):
+                if self._ask_is_apr(item):
                     item.ampr_emu = True
+            else:
+                item._ampr_asked = True
+
             if getattr(item, "ampr_emu", False):
                 self._ensure_ampr_folder()
                 self._update_ampr_status(item)
@@ -5380,15 +5401,18 @@ v1.0
         # Inject AMPR emu files — mkpfs 0.0.9 auto-builds ampr_emu.index
         self._inject_ampr_files(item)
 
-        # Show space diagnostics dialog if needed (in batch mode, skip if space is sufficient)
-        is_batch = len(self.queue) > 1 or self.batch_var.get()
-        space_is_ok = get_free_space(temp_dir) >= estimate_peak_space_needed(item.size, same_drive(temp_dir, out_dir))
-        if not (is_batch and space_is_ok):
+        # Space diagnostics check — in batch mode, log warning if space is tight, NEVER block with modal dialog
+        peak_space = estimate_peak_space_needed(item.size, same_drive(temp_dir, out_dir))
+        free_space = get_free_space(temp_dir)
+        space_is_ok = free_space >= peak_space
+        if not is_batch and not space_is_ok:
             diag = SpaceDiagnosticsDialog(self.root, item, temp_dir, out_dir)
             self.root.wait_window(diag)
             if not diag.proceed:
                 self.status_update("Ready", "Drive check cancelled.", "Ready", 0, 0, "00:00", "—", "—")
                 return
+        elif is_batch and not space_is_ok:
+            self.log("WARN", f"Space check: Temp drive is low for {item.name} (Need {format_size(peak_space)}, free {format_size(free_space)}). Continuing batch...")
 
         # Stale temp data check
         try:
@@ -6692,8 +6716,9 @@ v1.0
                         if self.summary_popup_var.get():
                             self.show_summary_popup()
 
-                # Prompt user to share compatibility data (skip during batch or if opted out)
-                if (not getattr(self, '_batch_running', False)
+                # Prompt user to share compatibility data (skip during batch runs or if opted out)
+                is_batch_mode = self._batch_total > 1 or getattr(self, '_batch_running', False)
+                if (not is_batch_mode
                         and not self.disable_compat_prompts_var.get()
                         and not self.offline_mode_var.get()):
                     self.root.after(400, lambda: self._prompt_compat_share(completed_item, _final_sz))
