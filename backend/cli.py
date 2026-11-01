@@ -258,6 +258,30 @@ def pack_folder_single_pass(
     print(f"[OK] Image created: {ffpfsc_path}")
 
 
+def pack_folder_to_exfat(
+    game_folder: Path,
+    exfat_path: Path,
+    mkpfs_cmd_base: list[str],
+    mkpfs_cwd: str | None,
+    *,
+    verbose: bool = False,
+) -> None:
+    print(f"[INFO] Building raw exFAT image: {game_folder.name} -> {exfat_path.name} (pack exfat)...")
+    cmd = mkpfs_cmd_base + [
+        "pack", "exfat",
+        str(game_folder), str(exfat_path)
+    ]
+    if verbose:
+        cmd.append("--verbose")
+    print(f"[INFO] Running: {' '.join(cmd)}", flush=True)
+    try:
+        subprocess.run(cmd, cwd=mkpfs_cwd, check=True)
+    except subprocess.CalledProcessError as e:
+        _mkpfs_error_hint(e, exfat_path)
+        sys.exit(1)
+    print(f"[OK] Raw exFAT image created: {exfat_path}")
+
+
 def compress_file_to_ffpfsc(
     source_file: Path,
     ffpfsc_path: Path,
@@ -312,6 +336,8 @@ def main() -> None:
     parser.add_argument("--batch",        action="store_true", help="Process all games/exfat files found under source")
     parser.add_argument("-f", "--force", "--overwrite", dest="overwrite", action="store_true", help="Overwrite existing files")
     parser.add_argument("--password",     type=str, help="Password for ZIP/RAR archives")
+    parser.add_argument("--output-format", choices=["ffpfsc", "exfat"], default="ffpfsc",
+                        help="Output format: 'ffpfsc' (default) or 'exfat' (raw exFAT image)")
     # MkPFS 0.0.9 tuning flags (forwarded to mkpfs pack folder / pack file)
     parser.add_argument("--compression-level", type=int, default=9,  metavar="0-9",
                         help="Zlib compression level (0=store, 9=max, default: 9)")
@@ -445,7 +471,7 @@ def main() -> None:
 
         for item in game_items:
             title_id = get_title_id(item)
-            ext = ".ffpfsc"
+            ext = ".exfat" if args.output_format == "exfat" else ".ffpfsc"
 
             if args.batch or ffpfs_path.is_dir():
                 current_ffpfs_path = ffpfs_path / f"{title_id}{ext}"
@@ -489,6 +515,12 @@ def main() -> None:
                     item, current_ffpfs_path, mkpfs_cmd_base, mkpfs_cwd,
                     temp_folder=user_temp,
                     **pack_kwargs,
+                )
+            elif args.output_format == "exfat":
+                # Raw exFAT image creation from game folder
+                pack_folder_to_exfat(
+                    item, current_ffpfs_path, mkpfs_cmd_base, mkpfs_cwd,
+                    verbose=args.verbose,
                 )
             else:
                 # Game folder: single-pass exFAT -> .ffpfsc (mkpfs 0.0.9+)
