@@ -4248,7 +4248,9 @@ v1.0
     def build_command(self, item):
         out = Path(self.output_var.get().strip())
         if self.per_game_folder_var.get() and item.name:
-            out = out / item.name
+            # Strip characters illegal on Windows filesystems: \ / : * ? " < > |
+            safe_name = re.sub(r'[\/:*?"<>|™®\\]', '', str(item.name)).strip('. ')
+            out = out / safe_name
             out.mkdir(parents=True, exist_ok=True)
         temp = Path(self.temp_var.get().strip())
         backend = backend_base_dir()

@@ -56,7 +56,8 @@ def get_title_id_from_name(name: str) -> str:
     for suffix in [".exfat", ".ffpkg", "-app0", "-app", "-patch0", "-patch"]:
         if fallback.lower().endswith(suffix):
             fallback = fallback[:-len(suffix)]
-    return fallback
+    # Force-strip Windows illegal characters from the string before returning it
+    return re.sub(r'[:*?"<>|™®\\]', '', fallback).strip('. ')
 
 
 def get_title_id(item_path: Path) -> str:
@@ -66,10 +67,13 @@ def get_title_id(item_path: Path) -> str:
             if param_path.is_file():
                 with open(param_path, encoding='utf-8') as f:
                     data = json.load(f)
-                    return data.get("titleId") or data.get("title_id") or ""
+                    title = data.get("titleId") or data.get("title_id") or ""
+                    if title:
+                        return re.sub(r'[:*?"<>|™®\\]', '', title).strip('. ')
         except Exception as e:
             print(f"[WARN] Could not parse param.json for title ID: {e}")
-    return get_title_id_from_name(item_path.name)
+    raw_name = get_title_id_from_name(item_path.name)
+    return re.sub(r'[:*?"<>|™®\\]', '', raw_name).strip('. ')
 
 
 _DISK_IMAGE_SUFFIXES = {'.exfat', '.ffpkg'}
