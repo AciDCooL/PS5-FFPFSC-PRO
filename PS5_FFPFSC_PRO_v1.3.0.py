@@ -12,9 +12,6 @@ import threading
 import subprocess
 import shutil
 from pathlib import Path
-from tkinter import filedialog, messagebox
-import tkinter as tk
-
 # Force UTF-8 stdio to avoid cp1252 / cp1250 UnicodeEncodeError on Windows
 for _stream in (sys.stdout, sys.stderr):
     if _stream and hasattr(_stream, "reconfigure"):
@@ -25,20 +22,48 @@ for _stream in (sys.stdout, sys.stderr):
 os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 os.environ.setdefault("PYTHONUTF8", "1")
 
-try:
-    import customtkinter as ctk
-except ImportError:
-    raise SystemExit("Missing customtkinter. Run: py -m pip install customtkinter")
+# Check CLI arguments before attempting GUI imports to allow running headlessly in containers
+_IS_HEADLESS_OR_WEB = any(arg in sys.argv for arg in ("--web", "-w", "--headless"))
+if not _IS_HEADLESS_OR_WEB and sys.platform.startswith("linux"):
+    if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        _IS_HEADLESS_OR_WEB = True
 
-# CTkButton.destroy() references self._font which is never set when __init__ raises
-# mid-way (bad color arg) or due to Python 3.14 / CTk 5.2.2 incompatibility.
-# Patch it globally so any missing _font is treated as None (no callback to remove).
-_orig_ctk_btn_destroy = ctk.CTkButton.destroy
-def _safe_ctk_btn_destroy(self):
-    if not hasattr(self, "_font"):
-        self._font = None
-    _orig_ctk_btn_destroy(self)
-ctk.CTkButton.destroy = _safe_ctk_btn_destroy
+ctk = None
+tk = None
+filedialog = None
+messagebox = None
+
+if not _IS_HEADLESS_OR_WEB:
+    try:
+        from tkinter import filedialog, messagebox
+        import tkinter as tk
+        import customtkinter as ctk
+
+        # CTkButton.destroy() patch
+        _orig_ctk_btn_destroy = ctk.CTkButton.destroy
+        def _safe_ctk_btn_destroy(self):
+            if not hasattr(self, "_font"):
+                self._font = None
+            _orig_ctk_btn_destroy(self)
+        ctk.CTkButton.destroy = _safe_ctk_btn_destroy
+    except Exception:
+        _IS_HEADLESS_OR_WEB = True
+        ctk = None
+        tk = None
+
+if ctk is None or tk is None:
+    class _DummyWidget:
+        def __init__(self, *args, **kwargs): pass
+        def __getattr__(self, name): return lambda *args, **kwargs: None
+    class _DummyModule:
+        StringVar = lambda *a, **k: None
+        BooleanVar = lambda *a, **k: None
+        IntVar = lambda *a, **k: None
+        def __getattr__(self, name): return _DummyWidget
+    ctk = _DummyModule()
+    tk = _DummyModule()
+    filedialog = _DummyModule()
+    messagebox = _DummyModule()
 
 try:
     from PIL import Image, ImageTk
@@ -63,9 +88,80 @@ APP_NAME = "PS5 FFPFSC PRO"
 APP_VERSION = "1.3.0"
 BACKEND_NAME = "bizkut/ps5-ffpfs-cli"
 MKPFS_NAME    = "MkPFS"
-MKPFS_VERSION = "0.0.9"
 
 APP_DIR = Path(os.getenv("APPDATA", str(Path.home()))) / "PS5_FFPFSC_PRO_BIZKUT"
+PLUGINS_DIR = Path(__file__).resolve().parent / "plugins"
+
+def detect_mkpfs_version() -> tuple[str, str]:
+    """Return (version_str, source_label) for the active MkPFS installation."""
+    plugin_dirs = [
+        PLUGINS_DIR,
+        APP_DIR / "plugins",
+    ]
+    for pdir in plugin_dirs:
+        if (pdir / "mkpfs" / "__main__.py").is_file():
+            cur_pypath = os.environ.get("PYTHONPATH", "")
+            if str(pdir) not in cur_pypath:
+                os.environ["PYTHONPATH"] = f"{pdir}{os.pathsep}{cur_pypath}".rstrip(os.pathsep)
+            try:
+                r = subprocess.run([sys.executable, "-m", "mkpfs", "-V"], cwd=str(pdir), capture_output=True, text=True, timeout=5)
+                m = re.search(r"(\d+(?:\.\d+)+)", (r.stdout or r.stderr).strip())
+                if m:
+                    return m.group(1), "Plugin"
+            except Exception:
+                pass
+
+    try:
+        r = subprocess.run([sys.executable, "-m", "mkpfs", "-V"], capture_output=True, text=True, timeout=5)
+        m = re.search(r"(\d+(?:\.\d+)+)", (r.stdout or r.stderr).strip())
+        if m and tuple(int(x) for x in m.group(1).split(".")) > (0, 0, 9):
+            return m.group(1), "Python Environment"
+    except Exception:
+        pass
+
+    return "0.0.9", "Bundled"
+
+
+def get_mkpfs_version() -> str:
+    return detect_mkpfs_version()[0]
+
+
+def install_or_upgrade_mkpfs_plugin(target_version: str | None = None, log_fn=None) -> tuple[bool, str]:
+    """Install or upgrade MkPFS as an independent plugin into the plugins/ directory."""
+    plugin_dir = PLUGINS_DIR
+    plugin_dir.mkdir(parents=True, exist_ok=True)
+    pkg = f"mkpfs=={target_version}" if target_version else "mkpfs"
+    cmd = [sys.executable, "-m", "pip", "install", "--target", str(plugin_dir), "--no-deps", "--upgrade", pkg]
+    if log_fn:
+        log_fn("INFO", f"Installing plugin {pkg} into {plugin_dir}...")
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        if res.returncode != 0:
+            err = res.stderr.strip() or res.stdout.strip()
+            return False, f"pip install failed (code {res.returncode}): {err[:200]}"
+        cur_pypath = os.environ.get("PYTHONPATH", "")
+        if str(plugin_dir) not in cur_pypath:
+            os.environ["PYTHONPATH"] = f"{plugin_dir}{os.pathsep}{cur_pypath}".rstrip(os.pathsep)
+        v_str, _ = detect_mkpfs_version()
+        return True, v_str
+    except Exception as exc:
+        return False, str(exc)
+
+
+def revert_mkpfs_plugin() -> bool:
+    """Remove plugin mkpfs to revert to the bundled copy."""
+    plugin_dir = PLUGINS_DIR
+    mkpfs_sub = plugin_dir / "mkpfs"
+    if mkpfs_sub.exists():
+        import shutil
+        shutil.rmtree(mkpfs_sub, ignore_errors=True)
+        for d in plugin_dir.glob("mkpfs-*.dist-info"):
+            shutil.rmtree(d, ignore_errors=True)
+        return True
+    return False
+
+
+MKPFS_VERSION = get_mkpfs_version()
 RAW_LOG_FILE = APP_DIR / "raw_tool_output.log"
 FINAL_REPORT_FILE = APP_DIR / "last_result_report.txt"
 HISTORY_FILE = APP_DIR / "history.json"
@@ -184,6 +280,27 @@ def format_eta(eta_str: str) -> str:
             return f"{s}s"
     except Exception:
         return eta_str
+
+
+def parse_speed_bps(speed_str: str) -> float:
+    """Parse a speed string like '290.95 MB/s' or '1.2 GB/s' into bytes per second."""
+    if not speed_str or speed_str in ("—", "-", ""):
+        return 0.0
+    m = re.search(r"([0-9.]+)\s*(GB|MB|KB|B)/s", speed_str, re.I)
+    if not m:
+        return 0.0
+    try:
+        val = float(m.group(1))
+        unit = m.group(2).upper()
+        if unit == "GB":
+            return val * (1024 ** 3)
+        elif unit == "MB":
+            return val * (1024 ** 2)
+        elif unit == "KB":
+            return val * 1024
+        return val
+    except Exception:
+        return 0.0
 
 
 def get_free_space(path: Path) -> int:
@@ -1091,15 +1208,15 @@ class SettingsWindow(ctk.CTkToplevel):
     def __init__(self, parent_widget, app):
         super().__init__(parent_widget)
         self.app = app
-        self.title(f"{APP_NAME} — Settings")
-        self.geometry("600x680")
+        self.title(f"{APP_NAME} — Options & Settings")
+        self.geometry("640x720")
         self.resizable(False, True)
         self.grab_set()
         self.configure(fg_color=BLACK)
         self._build()
 
     def _build(self):
-        ctk.CTkLabel(self, text="Settings",
+        ctk.CTkLabel(self, text="Options & Settings",
                       font=ctk.CTkFont(size=24, weight="bold"), text_color=WHITE).pack(anchor="w", padx=20, pady=(20, 2))
         ctk.CTkLabel(self, text="Changes apply immediately.", text_color=MUTED).pack(anchor="w", padx=20, pady=(0, 12))
 
@@ -1145,12 +1262,12 @@ class SettingsWindow(ctk.CTkToplevel):
         comp = ctk.CTkFrame(scroll, fg_color=PANEL, corner_radius=8)
         comp.pack(fill="x", pady=(4, 12))
         for text, var, key in [
-            ("Keep intermediate PFS image",           self.app.keep_pfs_var,        None),
-            ("Verify output (slower, uses more RAM)", self.app.verify_output_var,    None),
+            ("Keep intermediate PFS image",           self.app.keep_pfs_var,        "keep_pfs"),
+            ("Verify output (slower, uses more RAM)", self.app.verify_output_var,   "verify_output"),
             ("Auto-clear temp folder after success",  self.app.auto_clear_temp_var,  "auto_clear_temp"),
             ("Disable APR/AMPR question",             self.app.disable_ampr_prompt_var, "disable_ampr_prompt"),
             ("Per-game output subfolder (output/GameName/)", self.app.per_game_folder_var, "per_game_folder"),
-            ("Verbose mkpfs output (debug)",          self.app.verbose_var,           None),
+            ("Verbose mkpfs output (debug)",          self.app.verbose_var,          "verbose"),
         ]:
             cb = ctk.CTkCheckBox(comp, text=text, variable=var, fg_color=GREEN,
                                   hover_color=GREEN2, text_color=WHITE)
@@ -1227,14 +1344,17 @@ class SettingsWindow(ctk.CTkToplevel):
         self._section_label(scroll, "USER INTERFACE")
         ui = ctk.CTkFrame(scroll, fg_color=PANEL, corner_radius=8)
         ui.pack(fill="x", pady=(4, 12))
-        for text, var in [
-            ("Show summary popup when done", self.app.summary_popup_var),
-            ("Play sound on completion",     self.app.sound_complete_var),
-            ("Play sound on errors",         self.app.sound_error_var),
-            ("Open output folder when done", self.app.open_output_var),
+        for text, var, key in [
+            ("Show summary popup when done", self.app.summary_popup_var, "summary_popup"),
+            ("Play sound on completion",     self.app.sound_complete_var, "sound_complete"),
+            ("Play sound on errors",         self.app.sound_error_var,    "sound_error"),
+            ("Open output folder when done", self.app.open_output_var,    "open_output"),
         ]:
-            ctk.CTkCheckBox(ui, text=text, variable=var, fg_color=GREEN,
-                             hover_color=GREEN2, text_color=WHITE).pack(anchor="w", padx=14, pady=6)
+            cb = ctk.CTkCheckBox(ui, text=text, variable=var, fg_color=GREEN,
+                                 hover_color=GREEN2, text_color=WHITE)
+            if key:
+                cb.configure(command=lambda k=key, v=var: save_settings({k: v.get()}))
+            cb.pack(anchor="w", padx=14, pady=6)
         theme_row = ctk.CTkFrame(ui, fg_color=PANEL)
         theme_row.pack(fill="x", padx=14, pady=(4, 10))
         ctk.CTkLabel(theme_row, text="Theme:", text_color=WHITE).pack(side="left", padx=(0, 10))
@@ -1266,10 +1386,11 @@ class SettingsWindow(ctk.CTkToplevel):
         self._section_label(scroll, "ABOUT")
         about = ctk.CTkFrame(scroll, fg_color=PANEL, corner_radius=8)
         about.pack(fill="x", pady=(4, 12))
+        active_mkpfs_v, active_mkpfs_src = detect_mkpfs_version()
         for line in [
             f"Version:  {APP_NAME} v{APP_VERSION}",
             f"Backend:  {BACKEND_NAME} (v{FFPFSC_VERSION})",
-            f"MkPFS:    {MKPFS_NAME} v{MKPFS_VERSION}",
+            f"MkPFS:    {MKPFS_NAME} v{active_mkpfs_v} [{active_mkpfs_src}]",
             f"Config:   {SETTINGS_FILE}",
             f"History:  {HISTORY_FILE}",
             f"Log:      {RAW_LOG_FILE}",
@@ -1285,6 +1406,15 @@ class SettingsWindow(ctk.CTkToplevel):
         ctk.CTkButton(_about_btns, text="🔄  Check for Updates", fg_color=CARD2, text_color=WHITE,
                        hover_color=("#b0b0b0", "#2a2a2a"),
                        command=lambda: self.app._check_for_updates(silent=False)).pack(side="left", padx=(0, 8))
+        if active_mkpfs_src == "Plugin":
+            def _revert_and_refresh():
+                if revert_mkpfs_plugin():
+                    self.app.log("OK", "Reverted MkPFS plugin to bundled copy.")
+                    self.destroy()
+                    self.app.open_settings()
+            ctk.CTkButton(_about_btns, text="↩  Revert MkPFS to Bundled", fg_color=CARD2, text_color=WHITE,
+                           hover_color=("#b0b0b0", "#2a2a2a"),
+                           command=_revert_and_refresh).pack(side="left", padx=(0, 8))
         ctk.CTkButton(_about_btns, text="☕  Support on Ko-fi", fg_color=("#e74c3c", "#c0392b"),
                        text_color=WHITE, hover_color=("#c0392b", "#922b21"),
                        command=lambda: open_path("https://ko-fi.com/kingdkak")).pack(side="left")
@@ -2238,7 +2368,7 @@ class CLIWorker(threading.Thread):
             label = prog.group("label").strip()
             stage = self._stage_from_label(label, line)
 
-            sp = re.search(r"@\s*([0-9.]+\s*(?:GB|MB)/s)", label, re.I)
+            sp = re.search(r"@\s*([0-9.]+\s*(?:GB|MB|KB|B)/s)", label, re.I)
             if sp:
                 self.speed = sp.group(1)
 
@@ -2508,6 +2638,9 @@ class App:
         self._saved_block_size = settings.get("block_size", "auto")
         self.archive_passwords: list[str] = list(settings.get("archive_passwords", []))
         self._pw_win = None
+        self._queue_start_time: float = 0.0
+        self._queue_initial_bytes: int = 0
+        self._last_speed_bps: float = 0.0
 
     def _show_first_run_wizard(self):
         wiz = FirstRunWizard(self.root)
@@ -2570,7 +2703,7 @@ class App:
         self._button(header, "☀ Light / 🌙 Dark", self._toggle_theme, width=150).grid(row=1, column=2, padx=12, sticky="e")
         self._compact_btn = self._button(header, "⊡  Compact", self._toggle_compact, width=90)
         self._compact_btn.grid(row=1, column=3, padx=(0, 4), sticky="e")
-        self._settings_btn = self._button(header, "⚙  Settings", self.open_settings, width=110)
+        self._settings_btn = self._button(header, "⚙  Options & Settings", self.open_settings, width=150)
         self._settings_btn.grid(row=1, column=4, padx=(0, 4), sticky="e")
 
         # ── Variables ────────────────────────────────────────────────────────
@@ -2579,13 +2712,13 @@ class App:
         self.temp_var   = tk.StringVar(value=self._saved_temp)
         self.ampr_var   = tk.StringVar(value=self._saved_ampr_folder)
         self.password_var = tk.StringVar()
-        self.keep_pfs_var = tk.BooleanVar(value=False)
-        self.open_output_var = tk.BooleanVar(value=False)
-        self.summary_popup_var = tk.BooleanVar(value=True)
-        self.sound_complete_var = tk.BooleanVar(value=True)
-        self.sound_error_var = tk.BooleanVar(value=True)
+        self.keep_pfs_var = tk.BooleanVar(value=settings.get("keep_pfs", False))
+        self.open_output_var = tk.BooleanVar(value=settings.get("open_output", False))
+        self.summary_popup_var = tk.BooleanVar(value=settings.get("summary_popup", True))
+        self.sound_complete_var = tk.BooleanVar(value=settings.get("sound_complete", True))
+        self.sound_error_var = tk.BooleanVar(value=settings.get("sound_error", True))
         self.batch_var = tk.BooleanVar(value=False)
-        self.verify_output_var = tk.BooleanVar(value=False)
+        self.verify_output_var = tk.BooleanVar(value=settings.get("verify_output", False))
         self.auto_clear_temp_var  = tk.BooleanVar(value=self._saved_auto_clear_temp)
         self.per_game_folder_var  = tk.BooleanVar(value=self._saved_per_game_folder)
         self.disable_ampr_prompt_var = tk.BooleanVar(value=self._saved_disable_ampr_prompt)
@@ -2596,7 +2729,7 @@ class App:
         # MkPFS 0.0.8 tuning
         self.compression_level_var = tk.IntVar(value=self._saved_compression_level)
         self.cpu_count_var         = tk.IntVar(value=self._saved_cpu_count)
-        self.verbose_var           = tk.BooleanVar(value=False)
+        self.verbose_var           = tk.BooleanVar(value=settings.get("verbose", False))
         self.block_size_var        = tk.StringVar(value=self._saved_block_size)
         self._compact_mode         = False
 
@@ -2647,9 +2780,10 @@ class App:
         content.grid_columnconfigure(2, weight=2)   # right: game details + cmd
         content.grid_rowconfigure(0, weight=1)
 
-        # ── Left: Queue + Options ────────────────────────────────────────────
+        # ── Left: Queue ──────────────────────────────────────────────────────
         left = self.panel(content, row=0, column=0, sticky="nsew", padx=(0, 10))
         left.grid_columnconfigure(0, weight=1)
+        left.grid_rowconfigure(1, weight=1)
 
         ctk.CTkLabel(left, text="QUEUE", font=ctk.CTkFont(size=16, weight="bold"),
                       text_color=WHITE).grid(row=0, column=0, sticky="w", padx=14, pady=(14, 4))
@@ -2657,8 +2791,9 @@ class App:
         # Queue listbox — tk.Listbox for native single-row selection
         lb_frame = ctk.CTkFrame(left, fg_color=CARD, corner_radius=6,
                                  border_width=1, border_color=BORDER)
-        lb_frame.grid(row=1, column=0, sticky="ew", padx=14, pady=(0, 0))
+        lb_frame.grid(row=1, column=0, sticky="nsew", padx=14, pady=(0, 0))
         lb_frame.grid_columnconfigure(0, weight=1)
+        lb_frame.grid_rowconfigure(0, weight=1)
 
         _lb_bg   = "#111111"
         _lb_fg   = "#e8e8e8"
@@ -2671,7 +2806,7 @@ class App:
             font=("Consolas", 11),
             borderwidth=0, highlightthickness=0,
             activestyle="none", relief="flat",
-            height=7,
+            height=14,
             exportselection=False,
         )
         lb_scrollbar = tk.Scrollbar(lb_frame, orient="vertical",
@@ -2713,21 +2848,28 @@ class App:
         )
         self.batch_counter_label.grid(row=4, column=0, sticky="w", padx=14, pady=(0, 0))
 
+        self.queue_eta_var = tk.StringVar(value="")
+        self.queue_eta_label = ctk.CTkLabel(
+            left, textvariable=self.queue_eta_var,
+            text_color=("#1a7a40", "#4ade80"), font=ctk.CTkFont(size=12, weight="bold")
+        )
+        self.queue_eta_label.grid(row=5, column=0, sticky="w", padx=14, pady=(2, 2))
+
         if _HAS_DND:
             ctk.CTkLabel(left, text="↓ Drag & drop supported", text_color=MUTED,
-                          font=ctk.CTkFont(size=11)).grid(row=5, column=0, sticky="w", padx=14, pady=(0, 4))
+                          font=ctk.CTkFont(size=11)).grid(row=6, column=0, sticky="w", padx=14, pady=(0, 4))
 
-        # ── row 6: Archive password ───────────────────────────────────────────
+        # ── row 7: Archive password ───────────────────────────────────────────
         ctk.CTkLabel(left, text="ARCHIVE PASSWORD (OPTIONAL)",
                       font=ctk.CTkFont(size=13, weight="bold"),
-                      text_color=WHITE).grid(row=6, column=0, sticky="w", padx=14, pady=(10, 2))
+                      text_color=WHITE).grid(row=7, column=0, sticky="w", padx=14, pady=(10, 2))
         ctk.CTkLabel(left,
                       text="Only needed if your ZIP / RAR / 7z is password-protected.",
                       text_color=MUTED, font=ctk.CTkFont(size=11),
                       justify="left"
-                     ).grid(row=7, column=0, sticky="w", padx=14, pady=(0, 2))
+                     ).grid(row=8, column=0, sticky="w", padx=14, pady=(0, 2))
         pw_row = ctk.CTkFrame(left, fg_color="transparent")
-        pw_row.grid(row=8, column=0, sticky="ew", padx=14, pady=(0, 4))
+        pw_row.grid(row=9, column=0, sticky="ew", padx=14, pady=(0, 4))
         pw_row.grid_columnconfigure(0, weight=1)
         _pw_entry = ctk.CTkEntry(pw_row, textvariable=self.password_var,
                       placeholder_text="Archive password (if required)",
@@ -2752,61 +2894,22 @@ class App:
             m.tk_popup(event.x_root, event.y_root)
         _pw_entry.bind("<Button-3>", _pw_right_click)
 
-        # ── row 9: Options ────────────────────────────────────────────────────
-        ctk.CTkLabel(left, text="OPTIONS", font=ctk.CTkFont(size=16, weight="bold"),
-                      text_color=WHITE).grid(row=9, column=0, sticky="w", padx=14, pady=(10, 6))
-        opts = ctk.CTkFrame(left, fg_color=PANEL)
-        opts.grid(row=10, column=0, sticky="ew", padx=14, pady=(0, 10))
-        for textv, var, key in [
-            ("Open output folder when done",       self.open_output_var,      None),
-            ("Show summary popup",                 self.summary_popup_var,    None),
-            ("Play sound on completion",           self.sound_complete_var,   None),
-            ("Play sound on errors",               self.sound_error_var,      None),
-            ("Disable APR/AMPR question",          self.disable_ampr_prompt_var, "disable_ampr_prompt"),
-            ("Disable compat share popups",        self.disable_compat_prompts_var, "disable_compat_prompts"),
-            ("Check updates on startup",           self.check_updates_startup_var, "check_updates_startup"),
-            ("Offline mode (no network)",          self.offline_mode_var,     "offline_mode"),
-            ("Keep intermediate PFS",              self.keep_pfs_var,         None),
-            ("Verify Output (Slower, Uses More RAM)", self.verify_output_var, None),
-            ("Auto-clear temp after success",      self.auto_clear_temp_var,  "auto_clear_temp"),
-            ("Verbose mkpfs output (debug)",       self.verbose_var,          None),
-        ]:
-            cb = ctk.CTkCheckBox(opts, text=textv, variable=var, fg_color=GREEN, hover_color=GREEN2,
-                                 text_color=WHITE)
-            if key:
-                cb.configure(command=lambda k=key, v=var: save_settings({k: v.get()}))
-            cb.pack(anchor="w", pady=2)
+        # ── row 10: Options & Settings button ──────────────────────────────────
+        opt_box = ctk.CTkFrame(left, fg_color=CARD, corner_radius=8, border_width=1, border_color=BORDER)
+        opt_box.grid(row=10, column=0, sticky="ew", padx=14, pady=(14, 10))
+        opt_box.grid_columnconfigure(0, weight=1)
 
-        name_row = ctk.CTkFrame(opts, fg_color="transparent")
-        name_row.pack(fill="x", padx=4, pady=(6, 2))
-        ctk.CTkLabel(name_row, text="Output name:", text_color=WHITE,
-                     font=ctk.CTkFont(size=12)).pack(side="left", padx=(0, 8))
-        ctk.CTkOptionMenu(
-            name_row,
-            values=["Title ID", "Game Name"],
-            variable=self.naming_format_var,
-            fg_color=CARD,
-            button_color=GREEN,
-            button_hover_color=GREEN2,
-            text_color=WHITE,
-            width=130,
-            command=lambda v: [save_settings({"naming_format": v}), self.update_command_preview()]
-        ).pack(side="left")
+        self._button(
+            opt_box, "⚙  Options & Settings", self.open_settings,
+            height=36
+        ).pack(fill="x", padx=10, pady=(10, 6))
 
-        ctk.CTkButton(
-            opts,
-            text="🌐  Compat Database (Google Sheet)",
-            fg_color=CARD2,
-            hover_color=BORDER2,
-            text_color=WHITE,
-            font=ctk.CTkFont(size=11),
-            command=lambda: __import__("webbrowser").open(COMMUNITY_SHEET_URL)
-        ).pack(fill="x", padx=4, pady=(6, 4))
-
-        ctk.CTkLabel(opts,
-                      text="  FOLDER button detects single games and multi-dump parent folders.",
-                      text_color=MUTED, font=ctk.CTkFont(size=11),
-                      justify="left").pack(anchor="w", padx=4, pady=(4, 6))
+        ctk.CTkLabel(
+            opt_box,
+            text="Configure compression, output naming, paths,\nprivacy, sound & plugin updates.",
+            text_color=MUTED, font=ctk.CTkFont(size=11),
+            justify="center"
+        ).pack(fill="x", padx=10, pady=(0, 10))
 
         # ── Center: Progress + Stages ────────────────────────────────────────
         center = ctk.CTkFrame(content, fg_color=BLACK)
@@ -2819,9 +2922,14 @@ class App:
         progress.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(progress, text="OVERALL PROGRESS", text_color=WHITE,
                       font=ctk.CTkFont(size=15, weight="bold")).grid(row=0, column=0, sticky="w", padx=14, pady=(12, 2))
+        _op_right = ctk.CTkFrame(progress, fg_color="transparent")
+        _op_right.grid(row=0, column=1, sticky="e", padx=14, pady=(8, 0))
+        self.overall_eta_var = tk.StringVar(value="")
+        ctk.CTkLabel(_op_right, textvariable=self.overall_eta_var, text_color=MUTED,
+                      font=ctk.CTkFont(size=12, weight="bold")).pack(side="left", padx=(0, 10))
         self.overall_pct_var = tk.StringVar(value="0%")
-        ctk.CTkLabel(progress, textvariable=self.overall_pct_var, text_color=("#1a7a40", "#4ade80"),
-                      font=ctk.CTkFont(size=24, weight="bold")).grid(row=0, column=1, sticky="e", padx=14)
+        ctk.CTkLabel(_op_right, textvariable=self.overall_pct_var, text_color=("#1a7a40", "#4ade80"),
+                      font=ctk.CTkFont(size=24, weight="bold")).pack(side="left")
         self.overall_bar = ctk.CTkProgressBar(progress, progress_color=GREEN, fg_color=("#cccccc", "#242424"), height=14)
         self.overall_bar.grid(row=1, column=0, columnspan=2, sticky="ew", padx=14, pady=(0, 10))
         self.overall_bar.set(0)
@@ -3056,12 +3164,13 @@ class App:
                       font=ctk.CTkFont(size=13, weight="bold")).pack(anchor="w", padx=12, pady=(10, 4))
         self.speed_var       = tk.StringVar(value="Speed: —")
         self.elapsed_var     = tk.StringVar(value="Elapsed: 00:00")
-        self.eta_var         = tk.StringVar(value="ETA: —")
+        self.eta_var         = tk.StringVar(value="Game ETA: —")
+        self.stats_queue_eta_var = tk.StringVar(value="Queue ETA: —")
         self.saved_var       = tk.StringVar(value="Saved: —")
         self.ratio_var       = tk.StringVar(value="Compression: —")
         self.rating_var      = tk.StringVar(value="Rating: —")
         self.temp_space_var  = tk.StringVar(value="Temp Needed: —")
-        for v in [self.speed_var, self.elapsed_var, self.eta_var,
+        for v in [self.speed_var, self.elapsed_var, self.eta_var, self.stats_queue_eta_var,
                   self.saved_var, self.ratio_var, self.rating_var, self.temp_space_var]:
             ctk.CTkLabel(stats, textvariable=v, text_color=WHITE, anchor="w",
                           font=ctk.CTkFont(size=11)).pack(anchor="w", padx=12, pady=2)
@@ -3979,24 +4088,32 @@ v1.0
                 mkpfs_tag, mkpfs_notes, mkpfs_url = _fetch_release(MKPFS_API_LATEST)
                 ffpfsc_tag, ffpfsc_notes, ffpfsc_url = _fetch_release(FFPFSC_API_LATEST)
 
+                active_mkpfs_v, active_mkpfs_src = detect_mkpfs_version()
+
                 updates = []
                 if app_tag and _ver(app_tag) > _ver(APP_VERSION):
                     updates.append((APP_NAME, APP_VERSION, app_tag, app_url or GITHUB_RELEASES_URL, app_notes))
-                if mkpfs_tag and _ver(mkpfs_tag) > _ver(MKPFS_VERSION):
-                    updates.append((MKPFS_NAME, MKPFS_VERSION, mkpfs_tag, mkpfs_url or MKPFS_RELEASES_URL, mkpfs_notes))
+                if mkpfs_tag and _ver(mkpfs_tag) > _ver(active_mkpfs_v):
+                    updates.append((MKPFS_NAME, active_mkpfs_v, mkpfs_tag, mkpfs_url or MKPFS_RELEASES_URL, mkpfs_notes))
                 if ffpfsc_tag and _ver(ffpfsc_tag) > _ver(FFPFSC_VERSION):
                     updates.append(("Bizkut FFPFSC Backend", FFPFSC_VERSION, ffpfsc_tag, ffpfsc_url or FFPFSC_RELEASES_URL, ffpfsc_notes))
 
-                if updates:
-                    self.root.after(0, lambda: self._show_update_dialog(updates))
-                elif not silent:
-                    summary = (
-                        f"All components are up to date!\n\n"
-                        f"• {APP_NAME}: v{APP_VERSION} (Latest: v{app_tag or APP_VERSION})\n"
-                        f"• {MKPFS_NAME}: v{MKPFS_VERSION} (Latest: v{mkpfs_tag or MKPFS_VERSION})\n"
-                        f"• Bizkut Backend: v{FFPFSC_VERSION} (Latest: v{ffpfsc_tag or FFPFSC_VERSION})"
-                    )
-                    self.root.after(0, lambda: messagebox.showinfo("Up to date", summary))
+                if not silent:
+                    # Manual check from Settings: show full update dialog or up-to-date message
+                    if updates:
+                        self.root.after(0, lambda: self._show_update_dialog(updates))
+                    else:
+                        summary = (
+                            f"All components are up to date!\n\n"
+                            f"• {APP_NAME}: v{APP_VERSION} (Latest: v{app_tag or APP_VERSION})\n"
+                            f"• {MKPFS_NAME}: v{active_mkpfs_v} [{active_mkpfs_src}] (Latest: v{mkpfs_tag or active_mkpfs_v})\n"
+                            f"• Bizkut Backend: v{FFPFSC_VERSION} (Latest: v{ffpfsc_tag or FFPFSC_VERSION})"
+                        )
+                        self.root.after(0, lambda: messagebox.showinfo("Up to date", summary))
+                else:
+                    # Silent startup check — DO NOT SHOW INTRUSIVE POPUP MODAL!
+                    if updates:
+                        self.root.after(0, lambda: self._on_startup_updates_found(updates))
             except Exception as exc:
                 if not silent:
                     self.root.after(0, lambda: messagebox.showerror(
@@ -4006,11 +4123,18 @@ v1.0
 
         threading.Thread(target=_worker, daemon=True).start()
 
+    def _on_startup_updates_found(self, updates: list):
+        self._available_updates = updates
+        upd_names = [u[0] for u in updates]
+        self.log("INFO", f"Updates available on GitHub for: {', '.join(upd_names)}. Open Settings -> Check for Updates to review.")
+        if hasattr(self, "_settings_btn"):
+            self._settings_btn.configure(text="⚙  Settings ●")
+
     def _show_update_dialog(self, updates: list):
         win = ctk.CTkToplevel(self.root)
         win.title("Component Updates Available")
-        win.geometry("580x480")
-        win.minsize(500, 400)
+        win.geometry("600x500")
+        win.minsize(520, 420)
         win.grab_set()
         win.configure(fg_color=BLACK)
 
@@ -4022,7 +4146,7 @@ v1.0
             win.destroy()
 
         win.protocol("WM_DELETE_WINDOW", _upd_close)
-        ctk.CTkLabel(win, text="Updates Available on GitHub",
+        ctk.CTkLabel(win, text="Component Updates Available",
                       text_color=GREEN, font=ctk.CTkFont(size=16, weight="bold")).pack(pady=(16, 2))
         ctk.CTkLabel(win, text=f"{len(updates)} component(s) have newer releases available on GitHub:",
                       text_color=MUTED, font=ctk.CTkFont(size=12)).pack(pady=(0, 10))
@@ -4038,13 +4162,16 @@ v1.0
             top_row.pack(fill="x", padx=10, pady=(8, 4))
             ctk.CTkLabel(top_row, text=f"📦 {name}", font=ctk.CTkFont(size=14, weight="bold"),
                          text_color=WHITE).pack(side="left")
-            ctk.CTkLabel(top_row, text="⚠ Out of date", font=ctk.CTkFont(size=11, weight="bold"),
-                         text_color=YELLOW).pack(side="right")
+            status_badge = ctk.CTkLabel(top_row, text="⚠ Out of date", font=ctk.CTkFont(size=11, weight="bold"),
+                                        text_color=YELLOW)
+            status_badge.pack(side="right")
 
             v_row = ctk.CTkFrame(card, fg_color="transparent")
             v_row.pack(fill="x", padx=10, pady=(0, 4))
-            ctk.CTkLabel(v_row, text=f"Bundled: v{cur_v}  ->  Latest on GitHub: v{new_v}",
-                         text_color=MUTED, font=ctk.CTkFont(family="Consolas", size=12)).pack(side="left")
+            v_lbl_text = f"Installed: v{cur_v}  ->  Latest on GitHub: v{new_v}"
+            v_label = ctk.CTkLabel(v_row, text=v_lbl_text,
+                                   text_color=MUTED, font=ctk.CTkFont(family="Consolas", size=12))
+            v_label.pack(side="left")
 
             if notes:
                 tb = ctk.CTkTextbox(card, height=70, fg_color=PANEL, text_color=WHITE,
@@ -4055,9 +4182,39 @@ v1.0
 
             btn_row = ctk.CTkFrame(card, fg_color="transparent")
             btn_row.pack(fill="x", padx=10, pady=(2, 8))
-            ctk.CTkButton(btn_row, text=f"⬇ Open {name} Release", width=180, fg_color=GREEN,
-                          hover_color=GREEN2, text_color="#061006", font=ctk.CTkFont(size=11, weight="bold"),
-                          command=lambda u=url: open_path(u)).pack(side="left")
+
+            if name == MKPFS_NAME:
+                action_status = ctk.CTkLabel(card, text="", font=ctk.CTkFont(size=11), text_color=MUTED)
+                action_status.pack(fill="x", padx=10, pady=(0, 2))
+
+                def _upgrade_mkpfs(target_v=new_v, as_lbl=action_status, s_badge=status_badge, vl=v_label):
+                    as_lbl.configure(text=f"⏳ Upgrading MkPFS to v{target_v} via pip into plugins/...", text_color=YELLOW)
+                    def _bg():
+                        ok, res = install_or_upgrade_mkpfs_plugin(target_v, log_fn=self.log)
+                        if ok:
+                            self.root.after(0, lambda: [
+                                as_lbl.configure(text=f"✓ MkPFS upgraded to v{res} (Plugin active)!", text_color=("#1a7a40", "#4ade80")),
+                                s_badge.configure(text="✓ Up to date", text_color=("#1a7a40", "#4ade80")),
+                                vl.configure(text=f"Installed: v{res} [Plugin]  (Latest on GitHub: v{target_v})"),
+                                self.log("OK", f"MkPFS successfully upgraded to v{res} in plugins directory.")
+                            ])
+                        else:
+                            self.root.after(0, lambda: [
+                                as_lbl.configure(text=f"⚠ Upgrade failed: {res[:80]}", text_color=RED),
+                                self.log("ERROR", f"MkPFS plugin upgrade failed: {res}")
+                            ])
+                    threading.Thread(target=_bg, daemon=True).start()
+
+                ctk.CTkButton(btn_row, text=f"⚡ Upgrade MkPFS to v{new_v}", width=190, fg_color=GREEN,
+                              hover_color=GREEN2, text_color="#061006", font=ctk.CTkFont(size=11, weight="bold"),
+                              command=_upgrade_mkpfs).pack(side="left", padx=(0, 8))
+                ctk.CTkButton(btn_row, text="🌐 Release", width=100, fg_color=CARD2, text_color=WHITE,
+                              hover_color=("#b0b0b0", "#2a2a2a"),
+                              command=lambda u=url: open_path(u)).pack(side="left")
+            else:
+                ctk.CTkButton(btn_row, text=f"⬇ Open {name} Release", width=180, fg_color=GREEN,
+                              hover_color=GREEN2, text_color="#061006", font=ctk.CTkFont(size=11, weight="bold"),
+                              command=lambda u=url: open_path(u)).pack(side="left")
 
         ctk.CTkButton(win, text="Close", fg_color=CARD2, text_color=WHITE,
                       hover_color=("#b0b0b0", "#2a2a2a"), width=90,
@@ -4754,10 +4911,54 @@ v1.0
             msg += f" ({errors} item(s) could not be removed)"
         self.log("OK", msg)
 
-    # ── Feature 4: Batch auto-advance ─────────────────────────────────────────
+    # ── Feature 4: Batch auto-advance & Queue ETA ─────────────────────────────
+    def calculate_queue_eta(self, current_overall_pct: float, current_speed_str: str) -> str:
+        """Calculate estimated remaining time for the entire queue based on current speed."""
+        if not self.queue:
+            return "—"
+
+        current_item = self.queue[0]
+        current_sz = getattr(current_item, "size", 0) or 0
+        pct_remaining = max(0.0, min(1.0, 1.0 - (current_overall_pct / 100.0)))
+        current_bytes_left = current_sz * pct_remaining
+
+        remaining_items_bytes = sum(getattr(it, "size", 0) or 0 for it in self.queue[1:])
+        total_remaining_bytes = current_bytes_left + remaining_items_bytes
+
+        if total_remaining_bytes <= 0:
+            return "00:00"
+
+        # Parse speed
+        parsed_speed = parse_speed_bps(current_speed_str)
+        if parsed_speed > 0:
+            if getattr(self, "_last_speed_bps", 0.0) <= 0:
+                self._last_speed_bps = parsed_speed
+            else:
+                self._last_speed_bps = self._last_speed_bps * 0.7 + parsed_speed * 0.3
+
+        effective_speed = getattr(self, "_last_speed_bps", 0.0)
+
+        # Fallback to overall queue elapsed throughput if speed is not reported yet
+        if effective_speed <= 0:
+            q_start = getattr(self, "_queue_start_time", 0.0)
+            init_bytes = getattr(self, "_queue_initial_bytes", 0)
+            if q_start > 0 and init_bytes > 0:
+                elapsed = time.time() - q_start
+                done_bytes = max(0, init_bytes - total_remaining_bytes)
+                if elapsed > 5 and done_bytes > 0:
+                    effective_speed = done_bytes / elapsed
+
+        if effective_speed <= 0:
+            return "Calculating…"
+
+        eta_secs = int(total_remaining_bytes / effective_speed)
+        return format_duration(eta_secs)
+
     def _update_batch_counter(self):
         if not self._batch_running:
             self.batch_counter_var.set("")
+            self.queue_eta_var.set("")
+            self.overall_eta_var.set("")
             return
         current = self._batch_done + self._batch_failed + 1
         self.batch_counter_var.set(
@@ -4770,8 +4971,14 @@ v1.0
             self._batch_running = False
             self.start_btn.configure(state="normal")
             self.cancel_btn.configure(state="disabled")
+            self._queue_start_time = 0.0
+            self._last_speed_bps = 0.0
             self._update_batch_counter()
             return
+        if getattr(self, "_queue_start_time", 0.0) <= 0:
+            self._queue_start_time = time.time()
+        if getattr(self, "_queue_initial_bytes", 0) <= 0:
+            self._queue_initial_bytes = sum(getattr(it, "size", 0) or 0 for it in self.queue)
         item = self.queue[0]
         self.update_game_details(item)   # refreshes art + space stats for next game
 
@@ -4851,6 +5058,11 @@ v1.0
         total = self._batch_total
         done  = self._batch_done
         fail  = self._batch_failed
+        self._queue_start_time = 0.0
+        self._last_speed_bps = 0.0
+        self.queue_eta_var.set("")
+        self.overall_eta_var.set("")
+        self.stats_queue_eta_var.set("Queue ETA: —")
         self.batch_counter_var.set(
             f"Batch complete  |  ✓ {done}/{total}  ✗ {fail}/{total}"
         )
@@ -5207,6 +5419,9 @@ v1.0
         self._batch_done    = 0
         self._batch_failed  = 0
         self._batch_running = self._batch_total > 0
+        self._queue_start_time = time.time()
+        self._queue_initial_bytes = sum(getattr(it, "size", 0) or 0 for it in self.queue)
+        self._last_speed_bps = 0.0
         self._update_batch_counter()
 
         self._last_cmd_str = " ".join(cmd)
@@ -5222,6 +5437,11 @@ v1.0
 
     def cancel(self):
         self.cancel_requested = True
+        self._queue_start_time = 0.0
+        self._last_speed_bps = 0.0
+        self.queue_eta_var.set("")
+        self.overall_eta_var.set("")
+        self.stats_queue_eta_var.set("Queue ETA: —")
         self.status_update("Cancelling", "Cancel requested.", "Cancelling", 0, 0, "—", "—", "—")
 
     def status_update(self, title, detail, stage, stage_pct, overall_pct, elapsed, speed, eta):
@@ -6346,8 +6566,25 @@ v1.0
                 self.overall_bar.set(max(0, min(1, overall_pct / 100)))
                 self.speed_var.set(f"Speed: {speed}")
                 self.elapsed_var.set(f"Elapsed: {elapsed}")
-                self.eta_var.set(f"ETA: {eta}")
-                self.header_status_var.set(f"v{APP_VERSION}  |  Stage: {stage}")
+
+                # Calculate Queue ETA based on current speed and queue remaining size
+                queue_eta = self.calculate_queue_eta(overall_pct, speed)
+                if self._batch_total > 1 or len(self.queue) > 1:
+                    self.eta_var.set(f"Game ETA: {eta}")
+                    self.stats_queue_eta_var.set(f"Queue ETA: {queue_eta}")
+                    self.queue_eta_var.set(f"⏳ Queue ETA: {queue_eta}")
+                    self.overall_eta_var.set(f"Queue ETA: {queue_eta}")
+                    current_idx = self._batch_done + self._batch_failed + 1
+                    self.header_status_var.set(f"v{APP_VERSION}  |  Game {current_idx}/{self._batch_total}  |  Queue ETA: {queue_eta}")
+                else:
+                    disp_eta = eta if eta != "—" else queue_eta
+                    self.eta_var.set(f"ETA: {disp_eta}")
+                    self.stats_queue_eta_var.set(f"Queue ETA: {disp_eta}")
+                    if disp_eta != "—":
+                        self.queue_eta_var.set(f"⏳ ETA: {disp_eta}")
+                        self.overall_eta_var.set(f"ETA: {disp_eta}")
+                    self.header_status_var.set(f"v{APP_VERSION}  |  Stage: {stage}")
+
                 self.footer_var.set(f"● {title}")
                 self.update_stages_display(stage, stage_pct)
         except queue.Empty:
@@ -6386,6 +6623,11 @@ v1.0
                     self._batch_running = False
                     self.start_btn.configure(state="normal")
                     self.cancel_btn.configure(state="disabled")
+                    self._queue_start_time = 0.0
+                    self._last_speed_bps = 0.0
+                    self.queue_eta_var.set("")
+                    self.overall_eta_var.set("")
+                    self.stats_queue_eta_var.set("Queue ETA: —")
                     self.update_queue_box()
                     self._update_batch_counter()
                     if self._batch_total > 1:
@@ -6435,6 +6677,11 @@ v1.0
                     self._batch_running = False
                     self.start_btn.configure(state="normal")
                     self.cancel_btn.configure(state="disabled")
+                    self._queue_start_time = 0.0
+                    self._last_speed_bps = 0.0
+                    self.queue_eta_var.set("")
+                    self.overall_eta_var.set("")
+                    self.stats_queue_eta_var.set("Queue ETA: —")
                     self.update_queue_box()
                     self._update_batch_counter()
                     if self._batch_total > 1:
@@ -6499,16 +6746,31 @@ v1.0
             pass
 
 
-if _HAS_DND:
+if _HAS_DND and hasattr(ctk, "CTk"):
     class _CTkDnD(ctk.CTk, TkinterDnD.DnDWrapper):
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
             self.TkdndVersion = TkinterDnD._require(self)
-else:
+elif hasattr(ctk, "CTk"):
     _CTkDnD = ctk.CTk
+else:
+    _CTkDnD = None
 
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(description=f"{APP_NAME} v{APP_VERSION}")
+    parser.add_argument("--web", "-w", action="store_true", help="Launch WebUI mode")
+    parser.add_argument("--headless", action="store_true", help="Run headlessly in container/server mode (starts WebUI)")
+    parser.add_argument("--host", default=os.getenv("HOST", "0.0.0.0"), help="WebUI host address (default: 0.0.0.0)")
+    parser.add_argument("--port", "-p", type=int, default=int(os.getenv("PORT", "8080")), help="WebUI port (default: 8080)")
+    args, unknown = parser.parse_known_args()
+
+    if args.web or args.headless or _IS_HEADLESS_OR_WEB or _CTkDnD is None:
+        from backend.web import run_web_server
+        run_web_server(host=args.host, port=args.port)
+        return
+
     ensure_app_dir()
     root = _CTkDnD()
     App(root)

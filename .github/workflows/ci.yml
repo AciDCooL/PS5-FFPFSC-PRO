@@ -1,0 +1,86 @@
+name: CI & Integrity Checks
+
+on:
+  push:
+    branches: [ main, dev ]
+  pull_request:
+    branches: [ main, dev ]
+  workflow_dispatch:
+
+jobs:
+  python-syntax-test:
+    name: Python Syntax & Headless Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Syntax & Compilation Check
+        run: |
+          python -m py_compile PS5_FFPFSC_PRO_v1.3.0.py
+          python -m py_compile backend/cli.py
+          python -m py_compile backend/core.py
+          python -m py_compile backend/web.py
+          echo "All Python source files compiled successfully."
+
+      - name: CLI Help & Headless Flag Test
+        run: |
+          python PS5_FFPFSC_PRO_v1.3.0.py --help
+
+      - name: Test Headless WebUI API Endpoints
+        run: |
+          python -c '
+          import time, json, urllib.request, threading
+          from backend.core import QueueEngine
+          from backend.web import run_web_server
+
+          engine = QueueEngine()
+          port = 8877
+          srv = threading.Thread(target=run_web_server, kwargs={"host": "127.0.0.1", "port": port, "engine": engine}, daemon=True)
+          srv.start()
+          time.sleep(1.5)
+
+          req = urllib.request.urlopen(f"http://127.0.0.1:{port}/api/status")
+          data = json.loads(req.read().decode())
+          assert data["is_running"] is False, "Engine running status mismatch"
+          print("[PASS] Status endpoint returned healthy payload:", data["stage"])
+
+          settings_req = urllib.request.urlopen(f"http://127.0.0.1:{port}/api/settings")
+          s_data = json.loads(settings_req.read().decode())
+          print("[PASS] Settings endpoint returned healthy payload.")
+
+          fs_req = urllib.request.urlopen(f"http://127.0.0.1:{port}/api/fs/browse")
+          fs_data = json.loads(fs_req.read().decode())
+          assert "entries" in fs_data, "Filesystem browse missing entries"
+          print("[PASS] Filesystem browse endpoint returned valid tree.")
+          '
+
+  docker-build-test:
+    name: Docker Container Build Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Build Docker Image
+        run: |
+          docker build -t ps5-ffpfsc-pro:test .
+
+      - name: Test Container Healthcheck
+        run: |
+          docker run -d --name ps5-test-container -p 8080:8080 ps5-ffpfsc-pro:test
+          sleep 4
+          curl --fail --retry 3 --retry-delay 2 http://localhost:8080/api/status
+          docker stop ps5-test-container
+          docker rm ps5-test-container

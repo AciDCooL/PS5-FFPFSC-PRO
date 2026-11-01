@@ -5,7 +5,7 @@ echo  PS5 FFPFSC PRO v1.3.0 - EXE Builder
 echo ============================================================
 echo.
 echo Installing / updating dependencies...
-py -m pip install customtkinter pillow pyinstaller mkpfs==0.0.9 tkinterdnd2 py7zr rarfile cryptography zlib-ng
+py -m pip install -r requirements.txt pyinstaller
 echo.
 
 echo Cleaning previous build...

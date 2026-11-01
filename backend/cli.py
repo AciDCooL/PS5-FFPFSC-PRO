@@ -198,43 +198,85 @@ def _mkpfs_error_hint(exc: subprocess.CalledProcessError, output_path: Path) -> 
 
 
 def _locate_mkpfs() -> tuple[list[str], str | None]:
-    """Return (cmd_base, cwd) for invoking mkpfs."""
-    # Frozen EXE — use internal bundle
-    if getattr(sys, "frozen", False):
-        print("[INFO] Running in packaged/frozen environment. Using internal MkPFS bundle.")
-        return [sys.executable, "--mkpfs-internal"], None
+    """Return (cmd_base, cwd) for invoking mkpfs, prioritizing upgraded plugins over bundled copy."""
+    candidates = []
 
-    # Bundled package next to this script (backend/mkpfs/)
-    if os.path.isfile(_BUNDLED_MKPFS):
-        print(f"[INFO] Using bundled MkPFS package at {_CLI_DIR}")
-        return [sys.executable, "-m", "mkpfs"], _CLI_DIR
+    def _probe(cmd: list[str], cwd: str | None = None, label: str = ""):
+        try:
+            r = subprocess.run(cmd + ["-V"], cwd=cwd, capture_output=True, text=True, timeout=5)
+            out = (r.stdout or r.stderr).strip()
+            m = re.search(r"(\d+(?:\.\d+)+)", out)
+            if m:
+                v_str = m.group(1)
+                v_tup = tuple(int(x) for x in v_str.split("."))
+                return v_tup, v_str, cmd, cwd, label
+        except Exception:
+            pass
+        return (0,), "unknown", cmd, cwd, label
 
-    # Sibling workspace (legacy detection)
+    # 1. Plugin directories (project_root/plugins or APPDATA/plugins)
+    plugin_dirs = [
+        Path(_CLI_DIR).parent / "plugins",
+        Path(os.getenv("APPDATA", str(Path.home()))) / "PS5_FFPFSC_PRO_BIZKUT" / "plugins",
+    ]
+    for pdir in plugin_dirs:
+        if (pdir / "mkpfs" / "__main__.py").is_file():
+            cur_pypath = os.environ.get("PYTHONPATH", "")
+            if str(pdir) not in cur_pypath:
+                os.environ["PYTHONPATH"] = f"{pdir}{os.pathsep}{cur_pypath}".rstrip(os.pathsep)
+            res = _probe([sys.executable, "-m", "mkpfs"], cwd=str(pdir), label=f"Plugin (at {pdir})")
+            if res[0] > (0,):
+                candidates.append(res)
+
+    # 2. System PATH
+    if shutil.which("mkpfs"):
+        res = _probe(["mkpfs"], label="System PATH")
+        if res[0] > (0,):
+            candidates.append(res)
+
+    # 3. Environment pip package
+    res = _probe([sys.executable, "-m", "mkpfs"], label="Python environment")
+    if res[0] > (0, 0, 9):
+        candidates.append(res)
+
+    # 4. Sibling workspace directory
     parent_dir = Path(__file__).resolve().parent.parent
     try:
         for sibling in sorted(parent_dir.iterdir()):
             if sibling.is_dir() and (sibling / "mkpfs" / "__main__.py").is_file():
-                print(f"[INFO] Using local workspace directory at {sibling}")
-                return [sys.executable, "-m", "mkpfs"], str(sibling)
+                res = _probe([sys.executable, "-m", "mkpfs"], cwd=str(sibling), label=f"Local workspace at {sibling}")
+                if res[0] > (0,):
+                    candidates.append(res)
     except Exception:
         pass
 
-    # System PATH
-    if shutil.which("mkpfs"):
-        print("[INFO] Using system mkpfs from PATH.")
-        return ["mkpfs"], None
+    # 5. Bundled package (backend/mkpfs/) - fallback v0.0.9
+    if os.path.isfile(_BUNDLED_MKPFS):
+        candidates.append(((0, 0, 9), "0.0.9", [sys.executable, "-m", "mkpfs"], _CLI_DIR, "Bundled copy (v0.0.9)"))
 
-    # Auto-install via pip
+    # 6. Frozen EXE fallback
+    if getattr(sys, "frozen", False) and not candidates:
+        print("[INFO] Running in packaged/frozen environment. Using internal MkPFS bundle.")
+        return [sys.executable, "--mkpfs-internal"], None
+
+    if candidates:
+        # Highest version wins
+        candidates.sort(key=lambda c: c[0], reverse=True)
+        best = candidates[0]
+        print(f"[INFO] Using MkPFS: {best[4]} (v{best[1]})")
+        return best[2], best[3]
+
+    # Auto-install via pip as last resort
     print("[INFO] MkPFS not found. Installing automatically via pip...")
     res = subprocess.run(
-        [sys.executable, "-m", "pip", "install", "mkpfs==0.0.9"],
+        [sys.executable, "-m", "pip", "install", "mkpfs"],
         capture_output=True, text=True,
     )
     if res.returncode != 0:
         print("[ERROR] Failed to install mkpfs. Please install it manually: pip install mkpfs")
         print(res.stderr)
         sys.exit(1)
-    print("[OK] MkPFS 0.0.9 installed successfully.")
+    print("[OK] MkPFS installed successfully.")
     return [sys.executable, "-m", "mkpfs"], None
 
 
