@@ -4775,7 +4775,7 @@ v1.0
         item = self.queue[0]
         self.update_game_details(item)   # refreshes art + space stats for next game
 
-        # ── Space pre-flight dialog (auto-dismisses if OK, waits if LOW) ─────────
+        # ── Space pre-flight check (logged to console, non-blocking in batch) ─────
         try:
             tp = self.temp_var.get().strip()
             op = self.output_var.get().strip()
@@ -4788,14 +4788,6 @@ v1.0
                     f"Need {format_size(peak)} | Temp free {format_size(free)} "
                     f"| {'✓ OK' if free >= peak else '⚠ LOW'}"
                 )
-                diag = SpaceDiagnosticsDialog(self.root, item, td, od)
-                self.root.wait_window(diag)
-                if not diag.proceed:
-                    self._batch_running = False
-                    self.start_btn.configure(state="normal")
-                    self.cancel_btn.configure(state="disabled")
-                    self._update_batch_counter()
-                    return
         except Exception as e:
             self.log("WARN", f"Space pre-check skipped: {e}")
 
@@ -4807,10 +4799,20 @@ v1.0
             cmd, cwd, out_dir, temp_dir = self.build_command(item)
         except Exception as e:
             self.log("ERROR", f"Auto-advance build_command failed: {e}")
-            self._batch_running = False
-            self.start_btn.configure(state="normal")
-            self.cancel_btn.configure(state="disabled")
-            self._update_batch_counter()
+            if not hasattr(self, "_batch_failed_items"):
+                self._batch_failed_items = []
+            self._batch_failed_items.append((item.name, f"build_command failed: {e}"))
+            self._batch_failed += 1
+            if self.queue:
+                self.queue.pop(0)
+            if self.queue:
+                self.root.after(800, self._batch_auto_start)
+            else:
+                self._batch_running = False
+                self.start_btn.configure(state="normal")
+                self.cancel_btn.configure(state="disabled")
+                self._update_batch_counter()
+                self._show_batch_complete()
             return
         item.status = "Running"
         self.update_queue_box()
@@ -4862,6 +4864,13 @@ v1.0
             self.log("SUCCESS", f"🏁 Batch complete — all {total} game(s) compressed successfully.")
         else:
             self.log("WARN", f"🏁 Batch complete — {done}/{total} succeeded, {fail} failed.")
+            if getattr(self, "_batch_failed_items", None):
+                msg += "\nFailed Items:\n"
+                for fname, ferr in self._batch_failed_items[:10]:
+                    msg += f"  • {fname}: {ferr[:80]}\n"
+                if len(self._batch_failed_items) > 10:
+                    msg += f"  … and {len(self._batch_failed_items) - 10} more\n"
+        self._batch_failed_items = []
         messagebox.showinfo("Batch Complete", msg)
 
     # ── Start / Cancel ────────────────────────────────────────────────────────
@@ -5159,27 +5168,37 @@ v1.0
         # Inject AMPR emu files — mkpfs 0.0.9 auto-builds ampr_emu.index
         self._inject_ampr_files(item)
 
-        # Show space diagnostics dialog — opens instantly, drive type detects in background
-        diag = SpaceDiagnosticsDialog(self.root, item, temp_dir, out_dir)
-        self.root.wait_window(diag)
-        if not diag.proceed:
-            self.status_update("Ready", "Drive check cancelled.", "Ready", 0, 0, "00:00", "—", "—")
-            return
+        # Show space diagnostics dialog if needed (in batch mode, skip if space is sufficient)
+        is_batch = len(self.queue) > 1 or self.batch_var.get()
+        space_is_ok = get_free_space(temp_dir) >= estimate_peak_space_needed(item.size, same_drive(temp_dir, out_dir))
+        if not (is_batch and space_is_ok):
+            diag = SpaceDiagnosticsDialog(self.root, item, temp_dir, out_dir)
+            self.root.wait_window(diag)
+            if not diag.proceed:
+                self.status_update("Ready", "Drive check cancelled.", "Ready", 0, 0, "00:00", "—", "—")
+                return
 
-        # Stale temp data warning
+        # Stale temp data check
         try:
             if temp_dir.exists():
                 stale_items = [p for p in temp_dir.iterdir() if p.name.lower().startswith("tmp")]
                 if stale_items:
                     stale_size = sum(folder_size(p) for p in stale_items)
                     if stale_size > 1024 * 1024 * 1024:
-                        keep_running = messagebox.askyesno(
-                            "Temporary data found",
-                            f"Found {format_size(stale_size)} of old temporary data in:\n{temp_dir}\n\n"
-                            "Continue anyway?\n\nChoose No to manually delete old temp folders first."
-                        )
-                        if not keep_running:
-                            return
+                        if is_batch:
+                            if self.auto_clear_temp_var.get():
+                                self.log("INFO", f"Batch mode: auto-clearing {format_size(stale_size)} of old temp data.")
+                                self._auto_clear_temp()
+                            else:
+                                self.log("WARN", f"Batch mode: found {format_size(stale_size)} old temp data. Continuing...")
+                        else:
+                            keep_running = messagebox.askyesno(
+                                "Temporary data found",
+                                f"Found {format_size(stale_size)} of old temporary data in:\n{temp_dir}\n\n"
+                                "Continue anyway?\n\nChoose No to manually delete old temp folders first."
+                            )
+                            if not keep_running:
+                                return
         except Exception:
             pass
 
@@ -6347,13 +6366,32 @@ v1.0
                 # Continue into compression now that the item has a real path
                 self.start()
             else:
-                # Extraction failed — re-enable start, show error
-                self.start_btn.configure(state="normal")
-                self.cancel_btn.configure(state="disabled")
-                if self.queue:
-                    self.queue[0].status = "Failed"
+                # Extraction failed
+                failed_item = self.queue.pop(0) if self.queue else None
+                if failed_item:
+                    failed_item.status = "Failed"
+                    if not hasattr(self, "_batch_failed_items"):
+                        self._batch_failed_items = []
+                    self._batch_failed_items.append((failed_item.name, f"Extraction failed: {payload}"))
+                    self.log("ERROR", f"Extraction failed for {failed_item.name}: {payload}")
+                self.play_complete_sound(False)
+
+                if self._batch_running and self.queue:
+                    self._batch_failed += 1
+                    self.log("WARN", f"Batch continuing with next item ({len(self.queue)} remaining in queue)...")
                     self.update_queue_box()
-                messagebox.showerror("Extraction Failed", payload)
+                    self._update_batch_counter()
+                    self.root.after(800, self._batch_auto_start)
+                else:
+                    self._batch_running = False
+                    self.start_btn.configure(state="normal")
+                    self.cancel_btn.configure(state="disabled")
+                    self.update_queue_box()
+                    self._update_batch_counter()
+                    if self._batch_total > 1:
+                        self._show_batch_complete()
+                    else:
+                        messagebox.showerror("Extraction Failed", payload)
         except queue.Empty:
             pass
 
@@ -6431,16 +6469,32 @@ v1.0
                     return
 
                 self._batch_failed += 1
-                self._batch_running = False
-                self.start_btn.configure(state="normal")
-                self.cancel_btn.configure(state="disabled")
-                self.update_queue_box()
-                self._update_batch_counter()
+                if not hasattr(self, "_batch_failed_items"):
+                    self._batch_failed_items = []
+                if completed_item:
+                    self._batch_failed_items.append((completed_item.name, msg))
+
                 self.status_update("Failed", msg, "Failed", 0, 0, "—", "—", "—")
-                self.log("ERROR", msg)
+                self.log("ERROR", f"Compression failed for {completed_item.name if completed_item else 'item'}: {msg}")
                 self.play_complete_sound(False)
-                log_lines = get_last_log_lines(50)
-                ErrorDialog(self.root, msg, last_cmd, log_lines)
+
+                if self._batch_running and self.queue:
+                    self.log("WARN", f"Batch continuing with next item ({len(self.queue)} remaining in queue)...")
+                    self.update_queue_box()
+                    self._update_batch_counter()
+                    self._refresh_space_for_item(self.queue[0])
+                    self.root.after(800, self._batch_auto_start)
+                else:
+                    self._batch_running = False
+                    self.start_btn.configure(state="normal")
+                    self.cancel_btn.configure(state="disabled")
+                    self.update_queue_box()
+                    self._update_batch_counter()
+                    if self._batch_total > 1:
+                        self._show_batch_complete()
+                    else:
+                        log_lines = get_last_log_lines(50)
+                        ErrorDialog(self.root, msg, last_cmd, log_lines)
         except queue.Empty:
             pass
 
