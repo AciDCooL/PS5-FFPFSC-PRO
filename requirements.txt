@@ -1,0 +1,10 @@
+# PS5 FFPFSC PRO Dependencies
+customtkinter>=6.0.0
+pillow>=10.4.0
+mkpfs>=0.0.9
+py7zr>=0.20.0
+rarfile>=4.0
+cryptography>=42.0.0
+zlib-ng>=0.4.0
+pypresence>=4.3.0
+tkinterdnd2>=0.4.2; sys_platform == 'win32' or sys_platform == 'darwin'
