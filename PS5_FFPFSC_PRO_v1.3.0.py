@@ -2605,7 +2605,8 @@ class App:
         self.root.geometry("1400x960")
         self.root.minsize(1100, 760)
 
-        settings = load_settings()
+        self.settings = load_settings()
+        settings = self.settings
 
         # Validate saved folder paths — clear any that no longer exist so the
         # app doesn't crash or silently write to a stale/missing drive.
@@ -2707,6 +2708,7 @@ class App:
         self._settings_btn.grid(row=1, column=4, padx=(0, 4), sticky="e")
 
         # ── Variables ────────────────────────────────────────────────────────
+        settings = getattr(self, "settings", None) or load_settings()
         self.source_var = tk.StringVar()
         self.output_var = tk.StringVar(value=self._saved_output)
         self.temp_var   = tk.StringVar(value=self._saved_temp)
@@ -4116,9 +4118,10 @@ v1.0
                         self.root.after(0, lambda: self._on_startup_updates_found(updates))
             except Exception as exc:
                 if not silent:
-                    self.root.after(0, lambda: messagebox.showerror(
+                    err_msg = str(exc)
+                    self.root.after(0, lambda m=err_msg: messagebox.showerror(
                         "Update check failed",
-                        f"Could not reach GitHub:\n{exc}"
+                        f"Could not reach GitHub:\n{m}"
                     ))
 
         threading.Thread(target=_worker, daemon=True).start()
@@ -5854,7 +5857,8 @@ v1.0
             return
         if getattr(self, "offline_mode_var", None) and self.offline_mode_var.get():
             return
-        settings = load_settings()
+        self.settings = load_settings()
+        settings = self.settings
         if settings.get("skip_compat_reminder", False) or settings.get("disable_compat_prompts", False):
             return
         history  = load_history()
@@ -5964,7 +5968,7 @@ v1.0
                 if not (getattr(self, "offline_mode_var", None) and self.offline_mode_var.get()):
                     threading.Thread(target=_post, daemon=True).start()
                 else:
-                    self.log("OK", f"Compat report saved locally (offline mode active): {r['game_title']} — {r['status']}")
+                    self.log("OK", f"Compat report saved locally (offline mode active): {report['game_title']} — {report['status']}")
                 submitted += 1
             self.refresh_compat_list()
             win.destroy()
