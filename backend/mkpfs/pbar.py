@@ -11,6 +11,19 @@ import time
 from .utils import human_readable_size
 
 
+def _format_eta(eta_secs: float) -> str:
+    secs: int = int(max(0, eta_secs))
+    if secs >= 3600:
+        h, r = divmod(secs, 3600)
+        m, s = divmod(r, 60)
+        return f" ETA {h}h {m:02d}m {s:02d}s"
+    elif secs >= 60:
+        m, s = divmod(secs, 60)
+        return f" ETA {m}m {s:02d}s"
+    else:
+        return f" ETA {secs}s"
+
+
 class Progress:
     """Simple terminal progress helper used by CLI build flows.
 
@@ -71,13 +84,13 @@ class Progress:
                 if done < total:
                     remaining_bytes: float = (self.phase_bytes[phase] / done) * (total - done)
                     eta_secs: float = remaining_bytes / speed if speed > 0 else 0
-                    eta_str = f" ETA {int(eta_secs)}s" if eta_secs < 3600 else f" ETA {eta_secs / 60:.1f}m"
+                    eta_str = _format_eta(eta_secs)
             else:
                 speed: float = done / elapsed
                 speed_str = f" {speed:.1f} items/s"
                 if done < total:
                     eta_secs: float = (total - done) / speed if speed > 0 else 0
-                    eta_str = f" ETA {int(eta_secs)}s" if eta_secs < 3600 else f" ETA {eta_secs / 60:.1f}m"
+                    eta_str = _format_eta(eta_secs)
 
         line: str = f"[{bar}] {pct:3d}% {phase}{speed_str}{eta_str}"
         last_len: int = self.phase_last_len.get(phase, 0)

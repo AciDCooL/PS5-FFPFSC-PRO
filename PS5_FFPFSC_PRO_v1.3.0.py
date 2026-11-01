@@ -148,6 +148,35 @@ def format_duration(seconds) -> str:
     return f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
 
 
+def format_eta(eta_str: str) -> str:
+    """Format an ETA string into human-readable hours, minutes, and seconds."""
+    if not eta_str or eta_str in ("—", "-", ""):
+        return "—"
+    m = re.match(r"^([0-9.]+)\s*(s|sec|secs|seconds|m|min|mins|minutes|h|hr|hrs|hours)?$", eta_str.strip(), re.I)
+    if not m:
+        return eta_str
+    try:
+        val = float(m.group(1))
+        unit = (m.group(2) or "s").lower()
+        if unit.startswith("h"):
+            secs = val * 3600
+        elif unit.startswith("m"):
+            secs = val * 60
+        else:
+            secs = val
+        secs = int(max(0, secs))
+        h, r = divmod(secs, 3600)
+        m_val, s = divmod(r, 60)
+        if h > 0:
+            return f"{h}h {m_val:02d}m {s:02d}s"
+        elif m_val > 0:
+            return f"{m_val}m {s:02d}s"
+        else:
+            return f"{s}s"
+    except Exception:
+        return eta_str
+
+
 def get_free_space(path: Path) -> int:
     try:
         target = path if path.exists() else path.parent
@@ -1974,8 +2003,9 @@ class CLIWorker(threading.Thread):
             if sp:
                 self.speed = sp.group(1)
 
-            eta_match = re.search(r"ETA\s*([0-9]+\s*(?:s|m|h|sec|secs|seconds|min|mins|minutes)?)", label, re.I)
-            eta = eta_match.group(1).strip() if eta_match else "—"
+            eta_match = re.search(r"ETA\s*([0-9a-z\s.]+)", label, re.I)
+            raw_eta = eta_match.group(1).strip() if eta_match else "—"
+            eta = format_eta(raw_eta)
 
             if stage is None:
                 # Unrecognised progress line — update speed/eta but don't change stage
