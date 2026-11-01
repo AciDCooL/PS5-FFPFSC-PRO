@@ -1116,6 +1116,21 @@ class SettingsWindow(ctk.CTkToplevel):
                            command=lambda v=var, k=key, t=title: self._browse_folder(v, k, t)).grid(
                 row=row_i, column=2, padx=(0, 14), pady=8)
 
+        _name_row = ctk.CTkFrame(fold, fg_color="transparent")
+        _name_row.grid(row=3, column=0, columnspan=3, padx=14, pady=(4, 8), sticky="w")
+        ctk.CTkLabel(_name_row, text="Output File Naming:", text_color=MUTED, anchor="w", width=170).pack(side="left")
+        ctk.CTkOptionMenu(
+            _name_row,
+            values=["Title ID", "Game Name"],
+            variable=self.app.naming_format_var,
+            fg_color=CARD,
+            button_color=GREEN,
+            button_hover_color=GREEN2,
+            text_color=WHITE,
+            width=140,
+            command=lambda v: [save_settings({"naming_format": v}), self.app.update_command_preview()]
+        ).pack(side="left")
+
         # COMPRESSION
         self._section_label(scroll, "COMPRESSION")
         comp = ctk.CTkFrame(scroll, fg_color=PANEL, corner_radius=8)
@@ -2263,6 +2278,7 @@ class App:
         self._saved_per_game_folder = settings.get("per_game_folder", False)
         self._saved_auto_clear_temp = settings.get("auto_clear_temp", False)
         self._saved_disable_ampr_prompt = settings.get("disable_ampr_prompt", False)
+        self._saved_naming_format   = settings.get("naming_format", "Title ID")
         self._saved_compression_level = settings.get("compression_level", 9)
         self._saved_cpu_count = settings.get("cpu_count", 0)
         self._saved_block_size = settings.get("block_size", "auto")
@@ -2347,6 +2363,7 @@ class App:
         self.auto_clear_temp_var  = tk.BooleanVar(value=self._saved_auto_clear_temp)
         self.per_game_folder_var  = tk.BooleanVar(value=self._saved_per_game_folder)
         self.disable_ampr_prompt_var = tk.BooleanVar(value=self._saved_disable_ampr_prompt)
+        self.naming_format_var    = tk.StringVar(value=self._saved_naming_format)
         # MkPFS 0.0.8 tuning
         self.compression_level_var = tk.IntVar(value=self._saved_compression_level)
         self.cpu_count_var         = tk.IntVar(value=self._saved_cpu_count)
@@ -2521,6 +2538,22 @@ class App:
             if key:
                 cb.configure(command=lambda k=key, v=var: save_settings({k: v.get()}))
             cb.pack(anchor="w", pady=2)
+
+        name_row = ctk.CTkFrame(opts, fg_color="transparent")
+        name_row.pack(fill="x", padx=4, pady=(6, 2))
+        ctk.CTkLabel(name_row, text="Output name:", text_color=WHITE,
+                     font=ctk.CTkFont(size=12)).pack(side="left", padx=(0, 8))
+        ctk.CTkOptionMenu(
+            name_row,
+            values=["Title ID", "Game Name"],
+            variable=self.naming_format_var,
+            fg_color=CARD,
+            button_color=GREEN,
+            button_hover_color=GREEN2,
+            text_color=WHITE,
+            width=130,
+            command=lambda v: [save_settings({"naming_format": v}), self.update_command_preview()]
+        ).pack(side="left")
 
         ctk.CTkLabel(opts,
                       text="  FOLDER button detects single games and multi-dump parent folders.",
@@ -4380,6 +4413,8 @@ v1.0
             cmd += ["--block-size", block_size]
         if self.verbose_var.get():
             cmd.append("--verbose")
+        if self.naming_format_var.get() == "Game Name":
+            cmd += ["--naming-format", "game_name"]
         # Pass user temp dir so mkpfs uses the fast drive too
         temp_str = self.temp_var.get().strip()
         if temp_str:

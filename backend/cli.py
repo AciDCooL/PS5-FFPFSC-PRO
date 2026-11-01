@@ -76,6 +76,34 @@ def get_title_id(item_path: Path) -> str:
     return re.sub(r'[:*?"<>|™®\\]', '', raw_name).strip('. ')
 
 
+def get_game_name(item_path: Path) -> str:
+    """Return a sanitized game name for output file naming, falling back to title ID."""
+    if item_path.is_dir():
+        param_path = item_path / "sce_sys" / "param.json"
+        try:
+            if param_path.is_file():
+                with open(param_path, encoding='utf-8') as f:
+                    data = json.load(f)
+                    loc = data.get("localizedParameters", {})
+                    default_lang = loc.get("defaultLanguage", "en-US")
+                    title = (loc.get(default_lang, {}).get("titleName", "")
+                             or loc.get("en-US", {}).get("titleName", "")
+                             or next((v.get("titleName", "") for v in loc.values() if isinstance(v, dict) and v.get("titleName")), "")
+                             or data.get("titleName", ""))
+                    if title:
+                        clean = re.sub(r'[\/:*?"<>|™®\\]', '', title).strip('. ')
+                        if clean:
+                            return clean
+        except Exception as e:
+            print(f"[WARN] Could not parse param.json for game name: {e}")
+    # Fallback to sanitized stem without common dump suffixes
+    clean_stem = re.sub(r'[\/:*?"<>|™®\\]', '', item_path.stem).strip('. ')
+    for suffix in [".exfat", ".ffpkg", "-app0", "-app", "-patch0", "-patch"]:
+        if clean_stem.lower().endswith(suffix):
+            clean_stem = clean_stem[:-len(suffix)]
+    return clean_stem or get_title_id(item_path)
+
+
 _DISK_IMAGE_SUFFIXES = {'.exfat', '.ffpkg'}
 
 
@@ -338,6 +366,8 @@ def main() -> None:
     parser.add_argument("--password",     type=str, help="Password for ZIP/RAR archives")
     parser.add_argument("--output-format", choices=["ffpfsc", "exfat"], default="ffpfsc",
                         help="Output format: 'ffpfsc' (default) or 'exfat' (raw exFAT image)")
+    parser.add_argument("--naming-format", choices=["title_id", "game_name"], default="title_id",
+                        help="Output file naming format: 'title_id' (default) or 'game_name'")
     # MkPFS 0.0.9 tuning flags (forwarded to mkpfs pack folder / pack file)
     parser.add_argument("--compression-level", type=int, default=9,  metavar="0-9",
                         help="Zlib compression level (0=store, 9=max, default: 9)")
@@ -471,10 +501,11 @@ def main() -> None:
 
         for item in game_items:
             title_id = get_title_id(item)
+            out_stem = get_game_name(item) if args.naming_format == "game_name" else title_id
             ext = ".exfat" if args.output_format == "exfat" else ".ffpfsc"
 
             if args.batch or ffpfs_path.is_dir():
-                current_ffpfs_path = ffpfs_path / f"{title_id}{ext}"
+                current_ffpfs_path = ffpfs_path / f"{out_stem}{ext}"
             else:
                 current_ffpfs_path = ffpfs_path.with_suffix(ext)
 
