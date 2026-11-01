@@ -4,6 +4,18 @@ from __future__ import annotations  # makes str|None / list[X] work on Python 3.
 import sys
 import os
 
+# ── Force UTF-8 stdio ─────────────────────────────────────────────────────────
+# On Windows, piped stdout uses the locale codepage (e.g. cp1250/cp1252), which cannot
+# encode characters like '→' and crashes the backend with UnicodeEncodeError.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+# Propagate to child Python processes (mkpfs subprocesses).
+os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+os.environ.setdefault("PYTHONUTF8", "1")
+
 # ── Bundled mkpfs detection ───────────────────────────────────────────────────
 # When this script lives inside a 'backend/' folder, look for 'backend/mkpfs/'
 # and add 'backend/' to sys.path so 'import mkpfs' resolves to the bundled copy.
@@ -44,7 +56,8 @@ def get_title_id_from_name(name: str) -> str:
     for suffix in [".exfat", ".ffpkg", "-app0", "-app", "-patch0", "-patch"]:
         if fallback.lower().endswith(suffix):
             fallback = fallback[:-len(suffix)]
-    return fallback
+    # Force-strip Windows illegal characters from the string before returning it
+    return re.sub(r'[:*?"<>|™®\\]', '', fallback).strip('. ')
 
 
 def get_title_id(item_path: Path) -> str:
@@ -54,10 +67,41 @@ def get_title_id(item_path: Path) -> str:
             if param_path.is_file():
                 with open(param_path, encoding='utf-8') as f:
                     data = json.load(f)
-                    return data.get("titleId") or data.get("title_id") or ""
+                    title = data.get("titleId") or data.get("title_id") or ""
+                    if title:
+                        return re.sub(r'[:*?"<>|™®\\]', '', title).strip('. ')
         except Exception as e:
             print(f"[WARN] Could not parse param.json for title ID: {e}")
-    return get_title_id_from_name(item_path.name)
+    raw_name = get_title_id_from_name(item_path.name)
+    return re.sub(r'[:*?"<>|™®\\]', '', raw_name).strip('. ')
+
+
+def get_game_name(item_path: Path) -> str:
+    """Return a sanitized game name for output file naming, falling back to title ID."""
+    if item_path.is_dir():
+        param_path = item_path / "sce_sys" / "param.json"
+        try:
+            if param_path.is_file():
+                with open(param_path, encoding='utf-8') as f:
+                    data = json.load(f)
+                    loc = data.get("localizedParameters", {})
+                    default_lang = loc.get("defaultLanguage", "en-US")
+                    title = (loc.get(default_lang, {}).get("titleName", "")
+                             or loc.get("en-US", {}).get("titleName", "")
+                             or next((v.get("titleName", "") for v in loc.values() if isinstance(v, dict) and v.get("titleName")), "")
+                             or data.get("titleName", ""))
+                    if title:
+                        clean = re.sub(r'[\/:*?"<>|™®\\]', '', title).strip('. ')
+                        if clean:
+                            return clean
+        except Exception as e:
+            print(f"[WARN] Could not parse param.json for game name: {e}")
+    # Fallback to sanitized stem without common dump suffixes
+    clean_stem = re.sub(r'[\/:*?"<>|™®\\]', '', item_path.stem).strip('. ')
+    for suffix in [".exfat", ".ffpkg", "-app0", "-app", "-patch0", "-patch"]:
+        if clean_stem.lower().endswith(suffix):
+            clean_stem = clean_stem[:-len(suffix)]
+    return clean_stem or get_title_id(item_path)
 
 
 _DISK_IMAGE_SUFFIXES = {'.exfat', '.ffpkg'}
@@ -212,7 +256,7 @@ def pack_folder_single_pass(
     verbose: bool = False,
     temp_folder: Path | None = None,
 ) -> None:
-    print(f"[INFO] Packing {game_folder.name} → {ffpfsc_path.name} (single-pass exFAT+zstd)...")
+    print(f"[INFO] Packing {game_folder.name} -> {ffpfsc_path.name} (single-pass exFAT+zstd)...")
     cmd = mkpfs_cmd_base + [
         "pack", "folder",
         "--version", "PS5",
@@ -240,6 +284,30 @@ def pack_folder_single_pass(
         _mkpfs_error_hint(e, ffpfsc_path)
         sys.exit(1)
     print(f"[OK] Image created: {ffpfsc_path}")
+
+
+def pack_folder_to_exfat(
+    game_folder: Path,
+    exfat_path: Path,
+    mkpfs_cmd_base: list[str],
+    mkpfs_cwd: str | None,
+    *,
+    verbose: bool = False,
+) -> None:
+    print(f"[INFO] Building raw exFAT image: {game_folder.name} -> {exfat_path.name} (pack exfat)...")
+    cmd = mkpfs_cmd_base + [
+        "pack", "exfat",
+        str(game_folder), str(exfat_path)
+    ]
+    if verbose:
+        cmd.append("--verbose")
+    print(f"[INFO] Running: {' '.join(cmd)}", flush=True)
+    try:
+        subprocess.run(cmd, cwd=mkpfs_cwd, check=True)
+    except subprocess.CalledProcessError as e:
+        _mkpfs_error_hint(e, exfat_path)
+        sys.exit(1)
+    print(f"[OK] Raw exFAT image created: {exfat_path}")
 
 
 def compress_file_to_ffpfsc(
@@ -296,6 +364,10 @@ def main() -> None:
     parser.add_argument("--batch",        action="store_true", help="Process all games/exfat files found under source")
     parser.add_argument("-f", "--force", "--overwrite", dest="overwrite", action="store_true", help="Overwrite existing files")
     parser.add_argument("--password",     type=str, help="Password for ZIP/RAR archives")
+    parser.add_argument("--output-format", choices=["ffpfsc", "exfat"], default="ffpfsc",
+                        help="Output format: 'ffpfsc' (default) or 'exfat' (raw exFAT image)")
+    parser.add_argument("--naming-format", choices=["title_id", "game_name"], default="title_id",
+                        help="Output file naming format: 'title_id' (default) or 'game_name'")
     # MkPFS 0.0.9 tuning flags (forwarded to mkpfs pack folder / pack file)
     parser.add_argument("--compression-level", type=int, default=9,  metavar="0-9",
                         help="Zlib compression level (0=store, 9=max, default: 9)")
@@ -429,10 +501,11 @@ def main() -> None:
 
         for item in game_items:
             title_id = get_title_id(item)
-            ext = ".ffpfsc"
+            out_stem = get_game_name(item) if args.naming_format == "game_name" else title_id
+            ext = ".exfat" if args.output_format == "exfat" else ".ffpfsc"
 
             if args.batch or ffpfs_path.is_dir():
-                current_ffpfs_path = ffpfs_path / f"{title_id}{ext}"
+                current_ffpfs_path = ffpfs_path / f"{out_stem}{ext}"
             else:
                 current_ffpfs_path = ffpfs_path.with_suffix(ext)
 
@@ -474,8 +547,14 @@ def main() -> None:
                     temp_folder=user_temp,
                     **pack_kwargs,
                 )
+            elif args.output_format == "exfat":
+                # Raw exFAT image creation from game folder
+                pack_folder_to_exfat(
+                    item, current_ffpfs_path, mkpfs_cmd_base, mkpfs_cwd,
+                    verbose=args.verbose,
+                )
             else:
-                # Game folder: single-pass exFAT → .ffpfsc (mkpfs 0.0.9+)
+                # Game folder: single-pass exFAT -> .ffpfsc (mkpfs 0.0.9+)
                 # --keep-pfs is silently ignored for folder sources (no intermediate file)
                 pack_folder_single_pass(
                     item, current_ffpfs_path, mkpfs_cmd_base, mkpfs_cwd,

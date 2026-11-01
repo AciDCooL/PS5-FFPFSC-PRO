@@ -15,6 +15,16 @@ from pathlib import Path
 from tkinter import filedialog, messagebox
 import tkinter as tk
 
+# Force UTF-8 stdio to avoid cp1252 / cp1250 UnicodeEncodeError on Windows
+for _stream in (sys.stdout, sys.stderr):
+    if _stream and hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+os.environ.setdefault("PYTHONUTF8", "1")
+
 try:
     import customtkinter as ctk
 except ImportError:
@@ -64,6 +74,15 @@ COMPAT_FILE = APP_DIR / "compatibility.json"
 GITHUB_REPO         = "KINGDKAK/PS5-FFPFSC-PRO"
 GITHUB_API_LATEST   = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 GITHUB_RELEASES_URL = f"https://github.com/{GITHUB_REPO}/releases"
+
+MKPFS_REPO          = "PSBrew/MkPFS"
+MKPFS_API_LATEST    = f"https://api.github.com/repos/{MKPFS_REPO}/releases/latest"
+MKPFS_RELEASES_URL  = f"https://github.com/{MKPFS_REPO}/releases"
+
+FFPFSC_REPO         = "bizkut/ps5-ffpfs-cli"
+FFPFSC_API_LATEST   = f"https://api.github.com/repos/{FFPFSC_REPO}/releases/latest"
+FFPFSC_RELEASES_URL = f"https://github.com/{FFPFSC_REPO}/releases"
+FFPFSC_VERSION      = "1.1.9"
 
 COMMUNITY_URL = (
     "https://script.google.com/macros/s/"
@@ -136,6 +155,35 @@ def format_duration(seconds) -> str:
     h, r = divmod(seconds, 3600)
     m, s = divmod(r, 60)
     return f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
+
+
+def format_eta(eta_str: str) -> str:
+    """Format an ETA string into human-readable hours, minutes, and seconds."""
+    if not eta_str or eta_str in ("—", "-", ""):
+        return "—"
+    m = re.match(r"^([0-9.]+)\s*(s|sec|secs|seconds|m|min|mins|minutes|h|hr|hrs|hours)?$", eta_str.strip(), re.I)
+    if not m:
+        return eta_str
+    try:
+        val = float(m.group(1))
+        unit = (m.group(2) or "s").lower()
+        if unit.startswith("h"):
+            secs = val * 3600
+        elif unit.startswith("m"):
+            secs = val * 60
+        else:
+            secs = val
+        secs = int(max(0, secs))
+        h, r = divmod(secs, 3600)
+        m_val, s = divmod(r, 60)
+        if h > 0:
+            return f"{h}h {m_val:02d}m {s:02d}s"
+        elif m_val > 0:
+            return f"{m_val}m {s:02d}s"
+        else:
+            return f"{s}s"
+    except Exception:
+        return eta_str
 
 
 def get_free_space(path: Path) -> int:
@@ -1077,6 +1125,21 @@ class SettingsWindow(ctk.CTkToplevel):
                            command=lambda v=var, k=key, t=title: self._browse_folder(v, k, t)).grid(
                 row=row_i, column=2, padx=(0, 14), pady=8)
 
+        _name_row = ctk.CTkFrame(fold, fg_color="transparent")
+        _name_row.grid(row=3, column=0, columnspan=3, padx=14, pady=(4, 8), sticky="w")
+        ctk.CTkLabel(_name_row, text="Output File Naming:", text_color=MUTED, anchor="w", width=170).pack(side="left")
+        ctk.CTkOptionMenu(
+            _name_row,
+            values=["Title ID", "Game Name"],
+            variable=self.app.naming_format_var,
+            fg_color=CARD,
+            button_color=GREEN,
+            button_hover_color=GREEN2,
+            text_color=WHITE,
+            width=140,
+            command=lambda v: [save_settings({"naming_format": v}), self.app.update_command_preview()]
+        ).pack(side="left")
+
         # COMPRESSION
         self._section_label(scroll, "COMPRESSION")
         comp = ctk.CTkFrame(scroll, fg_color=PANEL, corner_radius=8)
@@ -1085,6 +1148,7 @@ class SettingsWindow(ctk.CTkToplevel):
             ("Keep intermediate PFS image",           self.app.keep_pfs_var,        None),
             ("Verify output (slower, uses more RAM)", self.app.verify_output_var,    None),
             ("Auto-clear temp folder after success",  self.app.auto_clear_temp_var,  "auto_clear_temp"),
+            ("Disable APR/AMPR question",             self.app.disable_ampr_prompt_var, "disable_ampr_prompt"),
             ("Per-game output subfolder (output/GameName/)", self.app.per_game_folder_var, "per_game_folder"),
             ("Verbose mkpfs output (debug)",          self.app.verbose_var,           None),
         ]:
@@ -1150,9 +1214,14 @@ class SettingsWindow(ctk.CTkToplevel):
         ctk.CTkLabel(comp, text="Pre-fill the archive password field for password-protected ZIPs/RARs/7zs.",
                       text_color=MUTED, font=ctk.CTkFont(size=11), anchor="w").pack(
             anchor="w", padx=14)
-        ctk.CTkEntry(comp, textvariable=self.app.password_var, show="*",
+        _pw_row = ctk.CTkFrame(comp, fg_color="transparent")
+        _pw_row.pack(fill="x", padx=14, pady=(4, 10))
+        ctk.CTkEntry(_pw_row, textvariable=self.app.password_var, show="*",
                       fg_color=CARD, border_color=BORDER2, text_color=WHITE).pack(
-            fill="x", padx=14, pady=(4, 10))
+            side="left", fill="x", expand=True, padx=(0, 8))
+        ctk.CTkButton(_pw_row, text="🔑 Manage Passwords", width=160, fg_color=CARD2, hover_color=BORDER2,
+                      text_color=WHITE, font=ctk.CTkFont(size=11),
+                      command=self.app.open_password_manager).pack(side="left")
 
         # USER INTERFACE
         self._section_label(scroll, "USER INTERFACE")
@@ -1177,8 +1246,8 @@ class SettingsWindow(ctk.CTkToplevel):
         about = ctk.CTkFrame(scroll, fg_color=PANEL, corner_radius=8)
         about.pack(fill="x", pady=(4, 12))
         for line in [
-            f"Version:  {APP_VERSION}",
-            f"Backend:  {BACKEND_NAME}",
+            f"Version:  {APP_NAME} v{APP_VERSION}",
+            f"Backend:  {BACKEND_NAME} (v{FFPFSC_VERSION})",
             f"MkPFS:    {MKPFS_NAME} v{MKPFS_VERSION}",
             f"Config:   {SETTINGS_FILE}",
             f"History:  {HISTORY_FILE}",
@@ -1222,10 +1291,163 @@ class SettingsWindow(ctk.CTkToplevel):
                       text_color=("#1a7a40", "#4ade80")).pack(anchor="w", pady=(10, 4))
 
     def _browse_folder(self, var, settings_key, title):
-        p = filedialog.askdirectory(title=title)
+        initial = self.app._get_browse_initialdir(var.get())
+        kwargs = {"title": title}
+        if initial:
+            kwargs["initialdir"] = initial
+        p = filedialog.askdirectory(**kwargs)
         if p:
             var.set(p)
             save_settings({settings_key: p})
+            self.app._remember_browse_dir(p)
+
+
+# ─── Password Manager Dialog ──────────────────────────────────────────────────
+
+class PasswordManagerDialog(ctk.CTkToplevel):
+    def __init__(self, parent, app):
+        super().__init__(parent)
+        self.app = app
+        self.title("Archive Password Manager")
+        self.geometry("520x460")
+        self.minsize(440, 360)
+        self.configure(fg_color=BLACK)
+        self.grab_set()
+
+        # Header
+        hdr = ctk.CTkFrame(self, fg_color="transparent")
+        hdr.pack(fill="x", padx=20, pady=(16, 6))
+        ctk.CTkLabel(hdr, text="🔑 Archive Passwords", font=ctk.CTkFont(size=16, weight="bold"),
+                     text_color=WHITE).pack(anchor="w")
+        ctk.CTkLabel(hdr, text="Configure preferred passwords for archives (.zip / .rar / .7z).\n"
+                               "They are attempted in top-to-bottom priority order automatically.",
+                     font=ctk.CTkFont(size=11), text_color=MUTED, justify="left").pack(anchor="w", pady=(2, 0))
+
+        # Add Row
+        add_frame = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=8)
+        add_frame.pack(fill="x", padx=20, pady=(4, 10))
+        self.new_pw_var = tk.StringVar()
+        self.entry = ctk.CTkEntry(add_frame, textvariable=self.new_pw_var, placeholder_text="Enter new password...",
+                                  fg_color=CARD, border_color=BORDER2, text_color=WHITE)
+        self.entry.pack(side="left", padx=(10, 8), pady=10, fill="x", expand=True)
+        self.entry.bind("<Return>", lambda _e: self._add_password())
+
+        ctk.CTkButton(add_frame, text="+ Add", width=80, fg_color=GREEN, hover_color=GREEN2,
+                      text_color="#061006", font=ctk.CTkFont(weight="bold"),
+                      command=self._add_password).pack(side="left", padx=(0, 10), pady=10)
+
+        # Content Frame: List on left, Action buttons on right
+        body = ctk.CTkFrame(self, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=20, pady=(0, 10))
+
+        list_card = ctk.CTkFrame(body, fg_color=CARD, border_width=1, border_color=BORDER2, corner_radius=6)
+        list_card.pack(side="left", fill="both", expand=True)
+
+        self.listbox = tk.Listbox(
+            list_card,
+            bg="#111116",
+            fg="#ffffff",
+            selectbackground="#1a7a40",
+            selectforeground="#ffffff",
+            activestyle="none",
+            borderwidth=0,
+            highlightthickness=0,
+            font=("Consolas", 11)
+        )
+        self.listbox.pack(side="left", fill="both", expand=True, padx=4, pady=4)
+        sb = tk.Scrollbar(list_card, orient="vertical", command=self.listbox.yview, bg="#111116")
+        sb.pack(side="right", fill="y")
+        self.listbox.config(yscrollcommand=sb.set)
+
+        # Right Action Buttons: Move Up, Move Down, Delete, Clear
+        btn_col = ctk.CTkFrame(body, fg_color="transparent")
+        btn_col.pack(side="left", fill="y", padx=(10, 0))
+
+        ctk.CTkButton(btn_col, text="▲ Move Up", width=100, fg_color=CARD2, hover_color=BORDER2,
+                      text_color=WHITE, command=self._move_up).pack(pady=(0, 6))
+        ctk.CTkButton(btn_col, text="▼ Move Down", width=100, fg_color=CARD2, hover_color=BORDER2,
+                      text_color=WHITE, command=self._move_down).pack(pady=(0, 6))
+        ctk.CTkButton(btn_col, text="🗑 Remove", width=100, fg_color="#441a1a", hover_color="#662222",
+                      text_color="#ff8888", command=self._remove).pack(pady=(0, 6))
+        ctk.CTkButton(btn_col, text="Clear All", width=100, fg_color=CARD2, hover_color=BORDER2,
+                      text_color=MUTED, command=self._clear_all).pack(pady=(0, 6))
+
+        # Bottom row
+        bot = ctk.CTkFrame(self, fg_color="transparent")
+        bot.pack(fill="x", padx=20, pady=(0, 16))
+        self.count_lbl = ctk.CTkLabel(bot, text="", text_color=MUTED, font=ctk.CTkFont(size=11))
+        self.count_lbl.pack(side="left")
+
+        ctk.CTkButton(bot, text="Done", width=90, fg_color=GREEN, hover_color=GREEN2,
+                      text_color="#061006", command=self.destroy).pack(side="right")
+
+        self._refresh()
+
+    def _refresh(self, select_idx=None):
+        self.listbox.delete(0, "end")
+        for i, pw in enumerate(self.app.archive_passwords):
+            self.listbox.insert("end", f" #{i+1:02d}  {pw}")
+        count = len(self.app.archive_passwords)
+        self.count_lbl.configure(text=f"{count} password(s) configured")
+        if select_idx is not None and 0 <= select_idx < count:
+            self.listbox.selection_clear(0, "end")
+            self.listbox.selection_set(select_idx)
+            self.listbox.activate(select_idx)
+            self.listbox.see(select_idx)
+
+    def _save(self):
+        save_settings({"archive_passwords": self.app.archive_passwords})
+
+    def _add_password(self):
+        val = self.new_pw_var.get().strip()
+        if not val:
+            return
+        if val in self.app.archive_passwords:
+            idx = self.app.archive_passwords.index(val)
+            self._refresh(select_idx=idx)
+            self.new_pw_var.set("")
+            return
+        self.app.archive_passwords.append(val)
+        self._save()
+        self.new_pw_var.set("")
+        self._refresh(select_idx=len(self.app.archive_passwords) - 1)
+
+    def _move_up(self):
+        sel = self.listbox.curselection()
+        if not sel or sel[0] == 0:
+            return
+        idx = sel[0]
+        pws = self.app.archive_passwords
+        pws[idx - 1], pws[idx] = pws[idx], pws[idx - 1]
+        self._save()
+        self._refresh(select_idx=idx - 1)
+
+    def _move_down(self):
+        sel = self.listbox.curselection()
+        if not sel or sel[0] >= len(self.app.archive_passwords) - 1:
+            return
+        idx = sel[0]
+        pws = self.app.archive_passwords
+        pws[idx + 1], pws[idx] = pws[idx], pws[idx + 1]
+        self._save()
+        self._refresh(select_idx=idx + 1)
+
+    def _remove(self):
+        sel = self.listbox.curselection()
+        if not sel:
+            return
+        idx = sel[0]
+        del self.app.archive_passwords[idx]
+        self._save()
+        new_sel = min(idx, len(self.app.archive_passwords) - 1) if self.app.archive_passwords else None
+        self._refresh(select_idx=new_sel)
+
+    def _clear_all(self):
+        if not self.app.archive_passwords:
+            return
+        self.app.archive_passwords.clear()
+        self._save()
+        self._refresh()
 
 
 # ─── Archive Extractor ─────────────────────────────────────────────────────────
@@ -1243,28 +1465,64 @@ class ArchiveExtractor:
 
     @staticmethod
     def extract(archive: Path, dest_root: Path, log_fn=None, progress_fn=None,
-                password: str = "") -> Path:
+                password: str = "", candidate_passwords: list[str] | None = None) -> Path:
         """Extract *archive* under *dest_root/<stem>* and return the extracted root.
         progress_fn(pct, filename) is called periodically.
-        password is used for encrypted archives (ZIP/RAR/7z)."""
+        Tries *password* first, then retries through *candidate_passwords* in priority order."""
         dest = dest_root / archive.stem
-        dest.mkdir(parents=True, exist_ok=True)
         suffix = archive.suffix.lower()
-        if log_fn:
-            log_fn("INFO", f"Extracting {archive.name} → {dest}"
-                   + (" [password-protected]" if password else ""))
-        if suffix == ".zip":
-            ArchiveExtractor._zip(archive, dest, log_fn, progress_fn, password)
-        elif suffix == ".rar":
-            ArchiveExtractor._rar(archive, dest, log_fn, progress_fn, password)
-        elif suffix == ".7z":
-            ArchiveExtractor._sevenz(archive, dest, log_fn, progress_fn, password)
-        else:
-            raise ValueError(f"Unsupported archive format: {archive.suffix}")
-        game_root = ArchiveExtractor._find_root(dest)
-        if log_fn:
-            log_fn("OK", f"Extracted to: {game_root}")
-        return game_root
+
+        # Build candidate password list preserving priority order
+        candidates: list[str] = []
+        if password and password.strip():
+            candidates.append(password.strip())
+        if candidate_passwords:
+            for p in candidate_passwords:
+                p_clean = str(p).strip()
+                if p_clean and p_clean not in candidates:
+                    candidates.append(p_clean)
+        if not candidates:
+            candidates.append("")
+
+        total_cands = len(candidates)
+        last_err: Exception | None = None
+
+        for idx, pwd in enumerate(candidates):
+            masked = (pwd[:2] + "*" * (len(pwd) - 2)) if len(pwd) > 2 else ("*" * len(pwd) if pwd else "(none)")
+            if log_fn:
+                if total_cands > 1:
+                    log_fn("INFO", f"Extracting {archive.name} (attempt {idx + 1}/{total_cands} with password: {masked})")
+                else:
+                    log_fn("INFO", f"Extracting {archive.name} -> {dest}" + (f" [password: {masked}]" if pwd else ""))
+
+            # Clean destination before each attempt so failed extractions don't leave corrupt partial files
+            if dest.exists():
+                shutil.rmtree(dest, ignore_errors=True)
+            dest.mkdir(parents=True, exist_ok=True)
+
+            try:
+                if suffix == ".zip":
+                    ArchiveExtractor._zip(archive, dest, log_fn, progress_fn, pwd)
+                elif suffix == ".rar":
+                    ArchiveExtractor._rar(archive, dest, log_fn, progress_fn, pwd)
+                elif suffix == ".7z":
+                    ArchiveExtractor._sevenz(archive, dest, log_fn, progress_fn, pwd)
+                else:
+                    raise ValueError(f"Unsupported archive format: {archive.suffix}")
+
+                game_root = ArchiveExtractor._find_root(dest)
+                if log_fn:
+                    if pwd:
+                        log_fn("OK", f"Archive extracted successfully using password: {masked}")
+                    else:
+                        log_fn("OK", f"Extracted to: {game_root}")
+                return game_root
+            except Exception as exc:
+                last_err = exc
+                if idx + 1 < total_cands and log_fn:
+                    log_fn("WARN", f"Password attempt {idx + 1} failed: {exc}. Retrying next password in list...")
+
+        raise RuntimeError(f"Extraction failed after trying {total_cands} candidate password(s). Last error: {last_err}")
 
     # ── format handlers ────────────────────────────────────────────────────────
 
@@ -1363,6 +1621,7 @@ class ArchiveExtractor:
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     text=True,
+                    errors="replace",
                     bufsize=1,
                     universal_newlines=True,
                     creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
@@ -1620,6 +1879,8 @@ class CLIWorker(threading.Thread):
         try:
             env = os.environ.copy()
             env["PYTHONUNBUFFERED"] = "1"
+            env["PYTHONIOENCODING"] = "utf-8"
+            env["PYTHONUTF8"] = "1"
             self.temp_dir.mkdir(parents=True, exist_ok=True)
             env["TEMP"] = str(self.temp_dir)
             env["TMP"] = str(self.temp_dir)
@@ -1632,6 +1893,8 @@ class CLIWorker(threading.Thread):
                 stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 bufsize=1,
                 universal_newlines=True,
                 env=env,
@@ -1958,8 +2221,9 @@ class CLIWorker(threading.Thread):
             if sp:
                 self.speed = sp.group(1)
 
-            eta_match = re.search(r"ETA\s*([0-9]+\s*(?:s|m|h|sec|secs|seconds|min|mins|minutes)?)", label, re.I)
-            eta = eta_match.group(1).strip() if eta_match else "—"
+            eta_match = re.search(r"ETA\s*([0-9a-z\s.]+)", label, re.I)
+            raw_eta = eta_match.group(1).strip() if eta_match else "—"
+            eta = format_eta(raw_eta)
 
             if stage is None:
                 # Unrecognised progress line — update speed/eta but don't change stage
@@ -2211,9 +2475,13 @@ class App:
         self._saved_ampr_folder     = settings.get("ampr_folder", "")
         self._saved_per_game_folder = settings.get("per_game_folder", False)
         self._saved_auto_clear_temp = settings.get("auto_clear_temp", False)
+        self._saved_disable_ampr_prompt = settings.get("disable_ampr_prompt", False)
+        self._saved_naming_format   = settings.get("naming_format", "Title ID")
         self._saved_compression_level = settings.get("compression_level", 9)
         self._saved_cpu_count = settings.get("cpu_count", 0)
         self._saved_block_size = settings.get("block_size", "auto")
+        self.archive_passwords: list[str] = list(settings.get("archive_passwords", []))
+        self._pw_win = None
 
     def _show_first_run_wizard(self):
         wiz = FirstRunWizard(self.root)
@@ -2294,6 +2562,8 @@ class App:
         self.verify_output_var = tk.BooleanVar(value=False)
         self.auto_clear_temp_var  = tk.BooleanVar(value=self._saved_auto_clear_temp)
         self.per_game_folder_var  = tk.BooleanVar(value=self._saved_per_game_folder)
+        self.disable_ampr_prompt_var = tk.BooleanVar(value=self._saved_disable_ampr_prompt)
+        self.naming_format_var    = tk.StringVar(value=self._saved_naming_format)
         # MkPFS 0.0.8 tuning
         self.compression_level_var = tk.IntVar(value=self._saved_compression_level)
         self.cpu_count_var         = tk.IntVar(value=self._saved_cpu_count)
@@ -2427,11 +2697,17 @@ class App:
                       text_color=MUTED, font=ctk.CTkFont(size=11),
                       justify="left"
                      ).grid(row=7, column=0, sticky="w", padx=14, pady=(0, 2))
-        _pw_entry = ctk.CTkEntry(left, textvariable=self.password_var,
+        pw_row = ctk.CTkFrame(left, fg_color="transparent")
+        pw_row.grid(row=8, column=0, sticky="ew", padx=14, pady=(0, 4))
+        pw_row.grid_columnconfigure(0, weight=1)
+        _pw_entry = ctk.CTkEntry(pw_row, textvariable=self.password_var,
                       placeholder_text="Archive password (if required)",
                       show="*", fg_color=CARD, border_color=BORDER2,
                       text_color=WHITE)
-        _pw_entry.grid(row=8, column=0, sticky="ew", padx=14, pady=(0, 4))
+        _pw_entry.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        ctk.CTkButton(pw_row, text="🔑 List", width=75, fg_color=CARD2, hover_color=BORDER2,
+                      text_color=WHITE, font=ctk.CTkFont(size=11),
+                      command=self.open_password_manager).grid(row=0, column=1)
         def _pw_right_click(event):
             import tkinter.font as _tkfont
             _mf = _tkfont.Font(family="Segoe UI", size=14)
@@ -2452,18 +2728,38 @@ class App:
                       text_color=WHITE).grid(row=9, column=0, sticky="w", padx=14, pady=(10, 6))
         opts = ctk.CTkFrame(left, fg_color=PANEL)
         opts.grid(row=10, column=0, sticky="ew", padx=14, pady=(0, 10))
-        for textv, var in [
-            ("Open output folder when done",       self.open_output_var),
-            ("Show summary popup",                 self.summary_popup_var),
-            ("Play sound on completion",           self.sound_complete_var),
-            ("Play sound on errors",               self.sound_error_var),
-            ("Keep intermediate PFS",              self.keep_pfs_var),
-            ("Verify Output (Slower, Uses More RAM)", self.verify_output_var),
-            ("Auto-clear temp after success",      self.auto_clear_temp_var),
-            ("Verbose mkpfs output (debug)",       self.verbose_var),
+        for textv, var, key in [
+            ("Open output folder when done",       self.open_output_var,      None),
+            ("Show summary popup",                 self.summary_popup_var,    None),
+            ("Play sound on completion",           self.sound_complete_var,   None),
+            ("Play sound on errors",               self.sound_error_var,      None),
+            ("Disable APR/AMPR question",          self.disable_ampr_prompt_var, "disable_ampr_prompt"),
+            ("Keep intermediate PFS",              self.keep_pfs_var,         None),
+            ("Verify Output (Slower, Uses More RAM)", self.verify_output_var, None),
+            ("Auto-clear temp after success",      self.auto_clear_temp_var,  "auto_clear_temp"),
+            ("Verbose mkpfs output (debug)",       self.verbose_var,          None),
         ]:
-            ctk.CTkCheckBox(opts, text=textv, variable=var, fg_color=GREEN, hover_color=GREEN2,
-                             text_color=WHITE).pack(anchor="w", pady=2)
+            cb = ctk.CTkCheckBox(opts, text=textv, variable=var, fg_color=GREEN, hover_color=GREEN2,
+                                 text_color=WHITE)
+            if key:
+                cb.configure(command=lambda k=key, v=var: save_settings({k: v.get()}))
+            cb.pack(anchor="w", pady=2)
+
+        name_row = ctk.CTkFrame(opts, fg_color="transparent")
+        name_row.pack(fill="x", padx=4, pady=(6, 2))
+        ctk.CTkLabel(name_row, text="Output name:", text_color=WHITE,
+                     font=ctk.CTkFont(size=12)).pack(side="left", padx=(0, 8))
+        ctk.CTkOptionMenu(
+            name_row,
+            values=["Title ID", "Game Name"],
+            variable=self.naming_format_var,
+            fg_color=CARD,
+            button_color=GREEN,
+            button_hover_color=GREEN2,
+            text_color=WHITE,
+            width=130,
+            command=lambda v: [save_settings({"naming_format": v}), self.update_command_preview()]
+        ).pack(side="left")
 
         ctk.CTkLabel(opts,
                       text="  FOLDER button detects single games and multi-dump parent folders.",
@@ -3425,6 +3721,12 @@ class App:
             return
         self._settings_win = SettingsWindow(self.root, self)
 
+    def open_password_manager(self):
+        if getattr(self, "_pw_win", None) and self._pw_win.winfo_exists():
+            self._pw_win.focus()
+            return
+        self._pw_win = PasswordManagerDialog(self.root, self)
+
     def _show_changelog(self):
         win = ctk.CTkToplevel(self.root)
         win.title(f"{APP_NAME} — Changelog")
@@ -3601,31 +3903,51 @@ v1.0
         import json as _json
         import threading
 
-        def _worker():
+        def _fetch_release(api_url):
             try:
-                req = _ur.Request(GITHUB_API_LATEST,
+                req = _ur.Request(api_url,
                                   headers={"User-Agent": f"PS5-FFPFSC-PRO/{APP_VERSION}",
                                            "Accept": "application/vnd.github+json"})
                 with _ur.urlopen(req, timeout=10) as resp:
                     data = _json.loads(resp.read().decode("utf-8"))
+                tag = data.get("tag_name", "").lstrip("v")
+                notes = data.get("body", "").strip()
+                html_url = data.get("html_url", "")
+                return tag, notes, html_url
+            except Exception:
+                return None, "", ""
 
-                tag      = data.get("tag_name", "").lstrip("v")
-                notes    = data.get("body", "").strip()
-                html_url = data.get("html_url", GITHUB_RELEASES_URL)
+        def _ver(v):
+            try:
+                return tuple(int(x) for x in re.findall(r"\d+", str(v)))
+            except Exception:
+                return (0,)
 
-                def _ver(v):
-                    try:
-                        return tuple(int(x) for x in v.split("."))
-                    except Exception:
-                        return (0,)
+        def _worker():
+            try:
+                # Check Main App, MkPFS, and Bizkut FFPFSC on GitHub
+                app_tag, app_notes, app_url = _fetch_release(GITHUB_API_LATEST)
+                mkpfs_tag, mkpfs_notes, mkpfs_url = _fetch_release(MKPFS_API_LATEST)
+                ffpfsc_tag, ffpfsc_notes, ffpfsc_url = _fetch_release(FFPFSC_API_LATEST)
 
-                if _ver(tag) > _ver(APP_VERSION):
-                    self.root.after(0, lambda: self._show_update_dialog(tag, notes, html_url))
+                updates = []
+                if app_tag and _ver(app_tag) > _ver(APP_VERSION):
+                    updates.append((APP_NAME, APP_VERSION, app_tag, app_url or GITHUB_RELEASES_URL, app_notes))
+                if mkpfs_tag and _ver(mkpfs_tag) > _ver(MKPFS_VERSION):
+                    updates.append((MKPFS_NAME, MKPFS_VERSION, mkpfs_tag, mkpfs_url or MKPFS_RELEASES_URL, mkpfs_notes))
+                if ffpfsc_tag and _ver(ffpfsc_tag) > _ver(FFPFSC_VERSION):
+                    updates.append(("Bizkut FFPFSC Backend", FFPFSC_VERSION, ffpfsc_tag, ffpfsc_url or FFPFSC_RELEASES_URL, ffpfsc_notes))
+
+                if updates:
+                    self.root.after(0, lambda: self._show_update_dialog(updates))
                 elif not silent:
-                    self.root.after(0, lambda: messagebox.showinfo(
-                        "Up to date",
-                        f"You're running the latest version ({APP_VERSION})."
-                    ))
+                    summary = (
+                        f"All components are up to date!\n\n"
+                        f"• {APP_NAME}: v{APP_VERSION} (Latest: v{app_tag or APP_VERSION})\n"
+                        f"• {MKPFS_NAME}: v{MKPFS_VERSION} (Latest: v{mkpfs_tag or MKPFS_VERSION})\n"
+                        f"• Bizkut Backend: v{FFPFSC_VERSION} (Latest: v{ffpfsc_tag or FFPFSC_VERSION})"
+                    )
+                    self.root.after(0, lambda: messagebox.showinfo("Up to date", summary))
             except Exception as exc:
                 if not silent:
                     self.root.after(0, lambda: messagebox.showerror(
@@ -3635,11 +3957,11 @@ v1.0
 
         threading.Thread(target=_worker, daemon=True).start()
 
-    def _show_update_dialog(self, new_version: str, notes: str, url: str):
+    def _show_update_dialog(self, updates: list):
         win = ctk.CTkToplevel(self.root)
-        win.title("Update Available")
-        win.geometry("520x420")
-        win.resizable(False, False)
+        win.title("Component Updates Available")
+        win.geometry("580x480")
+        win.minsize(500, 400)
         win.grab_set()
         win.configure(fg_color=BLACK)
 
@@ -3651,26 +3973,46 @@ v1.0
             win.destroy()
 
         win.protocol("WM_DELETE_WINDOW", _upd_close)
-        ctk.CTkLabel(win, text=f"Update Available  —  v{new_version}",
-                      text_color=GREEN, font=ctk.CTkFont(size=15, weight="bold")).pack(pady=(16, 2))
-        ctk.CTkLabel(win, text=f"You have v{APP_VERSION}",
-                      text_color=MUTED, font=ctk.CTkFont(size=11)).pack(pady=(0, 8))
+        ctk.CTkLabel(win, text="Updates Available on GitHub",
+                      text_color=GREEN, font=ctk.CTkFont(size=16, weight="bold")).pack(pady=(16, 2))
+        ctk.CTkLabel(win, text=f"{len(updates)} component(s) have newer releases available on GitHub:",
+                      text_color=MUTED, font=ctk.CTkFont(size=12)).pack(pady=(0, 10))
 
-        box = ctk.CTkTextbox(win, fg_color=PANEL, border_width=1, border_color=BORDER,
-                              text_color=WHITE, font=ctk.CTkFont(family="Consolas", size=11),
-                              wrap="word", state="normal")
-        box.pack(fill="both", expand=True, padx=16, pady=(0, 10))
-        box.insert("end", notes if notes else "No release notes provided.")
-        box.configure(state="disabled")
+        scroll = ctk.CTkScrollableFrame(win, fg_color=PANEL, corner_radius=8)
+        scroll.pack(fill="both", expand=True, padx=16, pady=(0, 10))
 
-        btns = ctk.CTkFrame(win, fg_color="transparent")
-        btns.pack(pady=(0, 14))
-        ctk.CTkButton(btns, text="⬇  Download Update", fg_color=GREEN, text_color="#061006",
-                       hover_color=GREEN2, width=160,
-                       command=lambda: [__import__("webbrowser").open(url), _upd_close()]).pack(side="left", padx=(0, 10))
-        ctk.CTkButton(btns, text="Later", fg_color=CARD2, text_color=WHITE,
-                       hover_color=("#b0b0b0", "#2a2a2a"), width=80,
-                       command=_upd_close).pack(side="left")
+        for name, cur_v, new_v, url, notes in updates:
+            card = ctk.CTkFrame(scroll, fg_color=CARD, corner_radius=6)
+            card.pack(fill="x", pady=6, padx=4)
+
+            top_row = ctk.CTkFrame(card, fg_color="transparent")
+            top_row.pack(fill="x", padx=10, pady=(8, 4))
+            ctk.CTkLabel(top_row, text=f"📦 {name}", font=ctk.CTkFont(size=14, weight="bold"),
+                         text_color=WHITE).pack(side="left")
+            ctk.CTkLabel(top_row, text="⚠ Out of date", font=ctk.CTkFont(size=11, weight="bold"),
+                         text_color=YELLOW).pack(side="right")
+
+            v_row = ctk.CTkFrame(card, fg_color="transparent")
+            v_row.pack(fill="x", padx=10, pady=(0, 4))
+            ctk.CTkLabel(v_row, text=f"Bundled: v{cur_v}  ->  Latest on GitHub: v{new_v}",
+                         text_color=MUTED, font=ctk.CTkFont(family="Consolas", size=12)).pack(side="left")
+
+            if notes:
+                tb = ctk.CTkTextbox(card, height=70, fg_color=PANEL, text_color=WHITE,
+                                    font=ctk.CTkFont(size=10), wrap="word")
+                tb.pack(fill="x", padx=10, pady=(2, 6))
+                tb.insert("end", notes[:400] + ("..." if len(notes) > 400 else ""))
+                tb.configure(state="disabled")
+
+            btn_row = ctk.CTkFrame(card, fg_color="transparent")
+            btn_row.pack(fill="x", padx=10, pady=(2, 8))
+            ctk.CTkButton(btn_row, text=f"⬇ Open {name} Release", width=180, fg_color=GREEN,
+                          hover_color=GREEN2, text_color="#061006", font=ctk.CTkFont(size=11, weight="bold"),
+                          command=lambda u=url: open_path(u)).pack(side="left")
+
+        ctk.CTkButton(win, text="Close", fg_color=CARD2, text_color=WHITE,
+                      hover_color=("#b0b0b0", "#2a2a2a"), width=90,
+                      command=_upd_close).pack(pady=(0, 14))
 
     # ── Drag & drop ───────────────────────────────────────────────────────────
     def _on_drop(self, event):
@@ -3687,11 +4029,56 @@ v1.0
                 self.log("WARN", f"Dropped path not found: {p}")
 
     # ── Folder browse ─────────────────────────────────────────────────────────
+    def _get_browse_initialdir(self, current_path: str = "") -> str | None:
+        """Return an existing directory to open the file dialog in:
+        1. If current_path is set and exists (or its parent exists), use it.
+        2. Else if a folder was previously picked during this session or saved, use it.
+        3. Else return None (allowing Windows Common Dialog to use its native last location).
+        """
+        if current_path:
+            try:
+                p = Path(str(current_path).strip().strip('"').strip("'"))
+                if p.is_dir():
+                    return str(p)
+                if p.parent and p.parent.is_dir():
+                    return str(p.parent)
+            except Exception:
+                pass
+        last = getattr(self, "_last_browse_dir", "")
+        if last:
+            try:
+                if Path(last).is_dir():
+                    return str(last)
+            except Exception:
+                pass
+        try:
+            saved = load_settings().get("last_browse_dir", "")
+            if saved and Path(saved).is_dir():
+                return str(saved)
+        except Exception:
+            pass
+        return None
+
+    def _remember_browse_dir(self, picked_path: str | Path):
+        try:
+            p = Path(picked_path)
+            folder = p if p.is_dir() else p.parent
+            if folder and folder.is_dir():
+                self._last_browse_dir = str(folder)
+                save_settings({"last_browse_dir": str(folder)})
+        except Exception:
+            pass
+
     def browse_source_folder(self):
         """Folder picker — single game folder or parent folder containing multiple dumps."""
-        path = filedialog.askdirectory(title="Select PS5 game folder or parent folder")
+        initial = self._get_browse_initialdir(self.source_var.get())
+        kwargs = {"title": "Select PS5 game folder or parent folder"}
+        if initial:
+            kwargs["initialdir"] = initial
+        path = filedialog.askdirectory(**kwargs)
         if not path:
             return
+        self._remember_browse_dir(path)
         p = Path(path)
         self.source_var.set(str(p))
         if not self.output_var.get():
@@ -3703,9 +4090,10 @@ v1.0
 
     def browse_source_archive(self):
         """File picker — select a .zip / .rar / .7z archive, .exfat, or .ffpkg disk image."""
-        path = filedialog.askopenfilename(
-            title="Select archive or disk image",
-            filetypes=[
+        initial = self._get_browse_initialdir(self.source_var.get())
+        kwargs = {
+            "title": "Select archive or disk image",
+            "filetypes": [
                 ("Supported files", "*.zip *.rar *.7z *.exfat *.ffpkg"),
                 ("Disk images",     "*.exfat *.ffpkg"),
                 ("Archives",        "*.zip *.rar *.7z"),
@@ -3714,9 +4102,13 @@ v1.0
                 ("7-Zip",           "*.7z"),
                 ("All files",       "*.*"),
             ]
-        )
+        }
+        if initial:
+            kwargs["initialdir"] = initial
+        path = filedialog.askopenfilename(**kwargs)
         if not path:
             return
+        self._remember_browse_dir(path)
         p = Path(path)
         self.source_var.set(str(p))
         if not self.output_var.get():
@@ -3726,8 +4118,13 @@ v1.0
         self.add_source_to_queue()
 
     def browse_output_folder(self):
-        p = filedialog.askdirectory(title="Select output folder")
+        initial = self._get_browse_initialdir(self.output_var.get())
+        kwargs = {"title": "Select output folder"}
+        if initial:
+            kwargs["initialdir"] = initial
+        p = filedialog.askdirectory(**kwargs)
         if p:
+            self._remember_browse_dir(p)
             self.output_var.set(p)
             if not self.temp_var.get():
                 self.temp_var.set(str(Path(p) / "_ffpfsc_temp"))
@@ -3735,8 +4132,13 @@ v1.0
             self.update_command_preview()
 
     def browse_temp_folder(self):
-        p = filedialog.askdirectory(title="Select temp folder")
+        initial = self._get_browse_initialdir(self.temp_var.get())
+        kwargs = {"title": "Select temp folder"}
+        if initial:
+            kwargs["initialdir"] = initial
+        p = filedialog.askdirectory(**kwargs)
         if p:
+            self._remember_browse_dir(p)
             tp = str(Path(p) / "_ffpfsc_temp")
             self.temp_var.set(tp)
             save_settings({"temp_folder": tp})
@@ -3940,13 +4342,15 @@ v1.0
                 )
 
         archive_password = self.password_var.get().strip()
+        candidates = list(self.archive_passwords)
 
         def worker():
             try:
                 extracted_root = ArchiveExtractor.extract(
                     archive, extract_root,
                     log_fn=self.log, progress_fn=_progress,
-                    password=archive_password
+                    password=archive_password,
+                    candidate_passwords=candidates
                 )
                 self.status_update("Scanning", "Extraction done — scanning for games…",
                                     "Scanning Files", 98, 98, "—", "—", "—")
@@ -4002,12 +4406,15 @@ v1.0
                                     "Scanning Files", pct, pct, "—", "—", "—")
 
         pwd = self.password_var.get().strip()
+        candidates = list(self.archive_passwords)
 
         def worker():
             try:
                 extracted_root = ArchiveExtractor.extract(
                     archive, extract_root,
-                    log_fn=self.log, progress_fn=_progress, password=pwd
+                    log_fn=self.log, progress_fn=_progress,
+                    password=pwd,
+                    candidate_passwords=candidates
                 )
                 games = find_game_folders(extracted_root)
                 game_path = games[0] if games else extracted_root
@@ -4233,7 +4640,9 @@ v1.0
     def build_command(self, item):
         out = Path(self.output_var.get().strip())
         if self.per_game_folder_var.get() and item.name:
-            out = out / item.name
+            # Strip characters illegal on Windows filesystems: \ / : * ? " < > |
+            safe_name = re.sub(r'[\/:*?"<>|™®\\]', '', str(item.name)).strip('. ')
+            out = out / safe_name
             out.mkdir(parents=True, exist_ok=True)
         temp = Path(self.temp_var.get().strip())
         backend = backend_base_dir()
@@ -4261,6 +4670,8 @@ v1.0
             cmd += ["--block-size", block_size]
         if self.verbose_var.get():
             cmd.append("--verbose")
+        if self.naming_format_var.get() == "Game Name":
+            cmd += ["--naming-format", "game_name"]
         # Pass user temp dir so mkpfs uses the fast drive too
         temp_str = self.temp_var.get().strip()
         if temp_str:
@@ -4373,7 +4784,7 @@ v1.0
         if item.path and item.path.is_dir():
             if not getattr(item, "ampr_emu", False) and not getattr(item, "_ampr_asked", False):
                 item._ampr_asked = True
-                if self._ask_is_apr(item):
+                if not self.disable_ampr_prompt_var.get() and self._ask_is_apr(item):
                     item.ampr_emu = True
             if getattr(item, "ampr_emu", False):
                 self._ensure_ampr_folder()
@@ -4528,14 +4939,26 @@ v1.0
                      font=ctk.CTkFont(size=12), text_color=MUTED,
                      justify="left").pack(padx=28, pady=(0, 18))
 
+        dont_ask_var = tk.BooleanVar(value=False)
+        ctk.CTkCheckBox(win, text="Don't ask again (remember in Options)",
+                        variable=dont_ask_var,
+                        fg_color=GREEN, hover_color=GREEN2,
+                        text_color=MUTED).pack(pady=(0, 14))
+
         btn_row = ctk.CTkFrame(win, fg_color="transparent")
         btn_row.pack(pady=(0, 22))
 
         def _yes():
             result[0] = True
+            if dont_ask_var.get():
+                self.disable_ampr_prompt_var.set(True)
+                save_settings({"disable_ampr_prompt": True})
             win.destroy()
 
         def _no():
+            if dont_ask_var.get():
+                self.disable_ampr_prompt_var.set(True)
+                save_settings({"disable_ampr_prompt": True})
             win.destroy()
 
         self._button(btn_row, "Yes — it's APR", _yes, green=True,
@@ -4678,7 +5101,7 @@ v1.0
         if item.path and item.path.is_dir():
             if not getattr(item, "ampr_emu", False) and not getattr(item, "_ampr_asked", False):
                 item._ampr_asked = True
-                if self._ask_is_apr(item):
+                if not self.disable_ampr_prompt_var.get() and self._ask_is_apr(item):
                     item.ampr_emu = True
             if getattr(item, "ampr_emu", False):
                 self._ensure_ampr_folder()

@@ -30,7 +30,10 @@ from pathlib import Path
 from typing import BinaryIO, Protocol
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-from zlib_ng import zlib_ng as zlib
+try:
+    from zlib_ng import zlib_ng as zlib
+except ImportError:
+    import zlib
 
 from . import consts
 from .exfat import EXFAT_SIGNATURE, ExfatEntry, ExfatError, ExfatReader
