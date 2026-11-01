@@ -63,9 +63,80 @@ APP_NAME = "PS5 FFPFSC PRO"
 APP_VERSION = "1.3.0"
 BACKEND_NAME = "bizkut/ps5-ffpfs-cli"
 MKPFS_NAME    = "MkPFS"
-MKPFS_VERSION = "0.0.9"
 
 APP_DIR = Path(os.getenv("APPDATA", str(Path.home()))) / "PS5_FFPFSC_PRO_BIZKUT"
+PLUGINS_DIR = Path(__file__).resolve().parent / "plugins"
+
+def detect_mkpfs_version() -> tuple[str, str]:
+    """Return (version_str, source_label) for the active MkPFS installation."""
+    plugin_dirs = [
+        PLUGINS_DIR,
+        APP_DIR / "plugins",
+    ]
+    for pdir in plugin_dirs:
+        if (pdir / "mkpfs" / "__main__.py").is_file():
+            cur_pypath = os.environ.get("PYTHONPATH", "")
+            if str(pdir) not in cur_pypath:
+                os.environ["PYTHONPATH"] = f"{pdir}{os.pathsep}{cur_pypath}".rstrip(os.pathsep)
+            try:
+                r = subprocess.run([sys.executable, "-m", "mkpfs", "-V"], cwd=str(pdir), capture_output=True, text=True, timeout=5)
+                m = re.search(r"(\d+(?:\.\d+)+)", (r.stdout or r.stderr).strip())
+                if m:
+                    return m.group(1), "Plugin"
+            except Exception:
+                pass
+
+    try:
+        r = subprocess.run([sys.executable, "-m", "mkpfs", "-V"], capture_output=True, text=True, timeout=5)
+        m = re.search(r"(\d+(?:\.\d+)+)", (r.stdout or r.stderr).strip())
+        if m and tuple(int(x) for x in m.group(1).split(".")) > (0, 0, 9):
+            return m.group(1), "Python Environment"
+    except Exception:
+        pass
+
+    return "0.0.9", "Bundled"
+
+
+def get_mkpfs_version() -> str:
+    return detect_mkpfs_version()[0]
+
+
+def install_or_upgrade_mkpfs_plugin(target_version: str | None = None, log_fn=None) -> tuple[bool, str]:
+    """Install or upgrade MkPFS as an independent plugin into the plugins/ directory."""
+    plugin_dir = PLUGINS_DIR
+    plugin_dir.mkdir(parents=True, exist_ok=True)
+    pkg = f"mkpfs=={target_version}" if target_version else "mkpfs"
+    cmd = [sys.executable, "-m", "pip", "install", "--target", str(plugin_dir), "--no-deps", "--upgrade", pkg]
+    if log_fn:
+        log_fn("INFO", f"Installing plugin {pkg} into {plugin_dir}...")
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        if res.returncode != 0:
+            err = res.stderr.strip() or res.stdout.strip()
+            return False, f"pip install failed (code {res.returncode}): {err[:200]}"
+        cur_pypath = os.environ.get("PYTHONPATH", "")
+        if str(plugin_dir) not in cur_pypath:
+            os.environ["PYTHONPATH"] = f"{plugin_dir}{os.pathsep}{cur_pypath}".rstrip(os.pathsep)
+        v_str, _ = detect_mkpfs_version()
+        return True, v_str
+    except Exception as exc:
+        return False, str(exc)
+
+
+def revert_mkpfs_plugin() -> bool:
+    """Remove plugin mkpfs to revert to the bundled copy."""
+    plugin_dir = PLUGINS_DIR
+    mkpfs_sub = plugin_dir / "mkpfs"
+    if mkpfs_sub.exists():
+        import shutil
+        shutil.rmtree(mkpfs_sub, ignore_errors=True)
+        for d in plugin_dir.glob("mkpfs-*.dist-info"):
+            shutil.rmtree(d, ignore_errors=True)
+        return True
+    return False
+
+
+MKPFS_VERSION = get_mkpfs_version()
 RAW_LOG_FILE = APP_DIR / "raw_tool_output.log"
 FINAL_REPORT_FILE = APP_DIR / "last_result_report.txt"
 HISTORY_FILE = APP_DIR / "history.json"
@@ -1266,10 +1337,11 @@ class SettingsWindow(ctk.CTkToplevel):
         self._section_label(scroll, "ABOUT")
         about = ctk.CTkFrame(scroll, fg_color=PANEL, corner_radius=8)
         about.pack(fill="x", pady=(4, 12))
+        active_mkpfs_v, active_mkpfs_src = detect_mkpfs_version()
         for line in [
             f"Version:  {APP_NAME} v{APP_VERSION}",
             f"Backend:  {BACKEND_NAME} (v{FFPFSC_VERSION})",
-            f"MkPFS:    {MKPFS_NAME} v{MKPFS_VERSION}",
+            f"MkPFS:    {MKPFS_NAME} v{active_mkpfs_v} [{active_mkpfs_src}]",
             f"Config:   {SETTINGS_FILE}",
             f"History:  {HISTORY_FILE}",
             f"Log:      {RAW_LOG_FILE}",
@@ -1285,6 +1357,15 @@ class SettingsWindow(ctk.CTkToplevel):
         ctk.CTkButton(_about_btns, text="🔄  Check for Updates", fg_color=CARD2, text_color=WHITE,
                        hover_color=("#b0b0b0", "#2a2a2a"),
                        command=lambda: self.app._check_for_updates(silent=False)).pack(side="left", padx=(0, 8))
+        if active_mkpfs_src == "Plugin":
+            def _revert_and_refresh():
+                if revert_mkpfs_plugin():
+                    self.app.log("OK", "Reverted MkPFS plugin to bundled copy.")
+                    self.destroy()
+                    self.app.open_settings()
+            ctk.CTkButton(_about_btns, text="↩  Revert MkPFS to Bundled", fg_color=CARD2, text_color=WHITE,
+                           hover_color=("#b0b0b0", "#2a2a2a"),
+                           command=_revert_and_refresh).pack(side="left", padx=(0, 8))
         ctk.CTkButton(_about_btns, text="☕  Support on Ko-fi", fg_color=("#e74c3c", "#c0392b"),
                        text_color=WHITE, hover_color=("#c0392b", "#922b21"),
                        command=lambda: open_path("https://ko-fi.com/kingdkak")).pack(side="left")
@@ -3979,24 +4060,32 @@ v1.0
                 mkpfs_tag, mkpfs_notes, mkpfs_url = _fetch_release(MKPFS_API_LATEST)
                 ffpfsc_tag, ffpfsc_notes, ffpfsc_url = _fetch_release(FFPFSC_API_LATEST)
 
+                active_mkpfs_v, active_mkpfs_src = detect_mkpfs_version()
+
                 updates = []
                 if app_tag and _ver(app_tag) > _ver(APP_VERSION):
                     updates.append((APP_NAME, APP_VERSION, app_tag, app_url or GITHUB_RELEASES_URL, app_notes))
-                if mkpfs_tag and _ver(mkpfs_tag) > _ver(MKPFS_VERSION):
-                    updates.append((MKPFS_NAME, MKPFS_VERSION, mkpfs_tag, mkpfs_url or MKPFS_RELEASES_URL, mkpfs_notes))
+                if mkpfs_tag and _ver(mkpfs_tag) > _ver(active_mkpfs_v):
+                    updates.append((MKPFS_NAME, active_mkpfs_v, mkpfs_tag, mkpfs_url or MKPFS_RELEASES_URL, mkpfs_notes))
                 if ffpfsc_tag and _ver(ffpfsc_tag) > _ver(FFPFSC_VERSION):
                     updates.append(("Bizkut FFPFSC Backend", FFPFSC_VERSION, ffpfsc_tag, ffpfsc_url or FFPFSC_RELEASES_URL, ffpfsc_notes))
 
-                if updates:
-                    self.root.after(0, lambda: self._show_update_dialog(updates))
-                elif not silent:
-                    summary = (
-                        f"All components are up to date!\n\n"
-                        f"• {APP_NAME}: v{APP_VERSION} (Latest: v{app_tag or APP_VERSION})\n"
-                        f"• {MKPFS_NAME}: v{MKPFS_VERSION} (Latest: v{mkpfs_tag or MKPFS_VERSION})\n"
-                        f"• Bizkut Backend: v{FFPFSC_VERSION} (Latest: v{ffpfsc_tag or FFPFSC_VERSION})"
-                    )
-                    self.root.after(0, lambda: messagebox.showinfo("Up to date", summary))
+                if not silent:
+                    # Manual check from Settings: show full update dialog or up-to-date message
+                    if updates:
+                        self.root.after(0, lambda: self._show_update_dialog(updates))
+                    else:
+                        summary = (
+                            f"All components are up to date!\n\n"
+                            f"• {APP_NAME}: v{APP_VERSION} (Latest: v{app_tag or APP_VERSION})\n"
+                            f"• {MKPFS_NAME}: v{active_mkpfs_v} [{active_mkpfs_src}] (Latest: v{mkpfs_tag or active_mkpfs_v})\n"
+                            f"• Bizkut Backend: v{FFPFSC_VERSION} (Latest: v{ffpfsc_tag or FFPFSC_VERSION})"
+                        )
+                        self.root.after(0, lambda: messagebox.showinfo("Up to date", summary))
+                else:
+                    # Silent startup check — DO NOT SHOW INTRUSIVE POPUP MODAL!
+                    if updates:
+                        self.root.after(0, lambda: self._on_startup_updates_found(updates))
             except Exception as exc:
                 if not silent:
                     self.root.after(0, lambda: messagebox.showerror(
@@ -4006,11 +4095,18 @@ v1.0
 
         threading.Thread(target=_worker, daemon=True).start()
 
+    def _on_startup_updates_found(self, updates: list):
+        self._available_updates = updates
+        upd_names = [u[0] for u in updates]
+        self.log("INFO", f"Updates available on GitHub for: {', '.join(upd_names)}. Open Settings -> Check for Updates to review.")
+        if hasattr(self, "_settings_btn"):
+            self._settings_btn.configure(text="⚙  Settings ●")
+
     def _show_update_dialog(self, updates: list):
         win = ctk.CTkToplevel(self.root)
         win.title("Component Updates Available")
-        win.geometry("580x480")
-        win.minsize(500, 400)
+        win.geometry("600x500")
+        win.minsize(520, 420)
         win.grab_set()
         win.configure(fg_color=BLACK)
 
@@ -4022,7 +4118,7 @@ v1.0
             win.destroy()
 
         win.protocol("WM_DELETE_WINDOW", _upd_close)
-        ctk.CTkLabel(win, text="Updates Available on GitHub",
+        ctk.CTkLabel(win, text="Component Updates Available",
                       text_color=GREEN, font=ctk.CTkFont(size=16, weight="bold")).pack(pady=(16, 2))
         ctk.CTkLabel(win, text=f"{len(updates)} component(s) have newer releases available on GitHub:",
                       text_color=MUTED, font=ctk.CTkFont(size=12)).pack(pady=(0, 10))
@@ -4038,13 +4134,16 @@ v1.0
             top_row.pack(fill="x", padx=10, pady=(8, 4))
             ctk.CTkLabel(top_row, text=f"📦 {name}", font=ctk.CTkFont(size=14, weight="bold"),
                          text_color=WHITE).pack(side="left")
-            ctk.CTkLabel(top_row, text="⚠ Out of date", font=ctk.CTkFont(size=11, weight="bold"),
-                         text_color=YELLOW).pack(side="right")
+            status_badge = ctk.CTkLabel(top_row, text="⚠ Out of date", font=ctk.CTkFont(size=11, weight="bold"),
+                                        text_color=YELLOW)
+            status_badge.pack(side="right")
 
             v_row = ctk.CTkFrame(card, fg_color="transparent")
             v_row.pack(fill="x", padx=10, pady=(0, 4))
-            ctk.CTkLabel(v_row, text=f"Bundled: v{cur_v}  ->  Latest on GitHub: v{new_v}",
-                         text_color=MUTED, font=ctk.CTkFont(family="Consolas", size=12)).pack(side="left")
+            v_lbl_text = f"Installed: v{cur_v}  ->  Latest on GitHub: v{new_v}"
+            v_label = ctk.CTkLabel(v_row, text=v_lbl_text,
+                                   text_color=MUTED, font=ctk.CTkFont(family="Consolas", size=12))
+            v_label.pack(side="left")
 
             if notes:
                 tb = ctk.CTkTextbox(card, height=70, fg_color=PANEL, text_color=WHITE,
@@ -4055,9 +4154,39 @@ v1.0
 
             btn_row = ctk.CTkFrame(card, fg_color="transparent")
             btn_row.pack(fill="x", padx=10, pady=(2, 8))
-            ctk.CTkButton(btn_row, text=f"⬇ Open {name} Release", width=180, fg_color=GREEN,
-                          hover_color=GREEN2, text_color="#061006", font=ctk.CTkFont(size=11, weight="bold"),
-                          command=lambda u=url: open_path(u)).pack(side="left")
+
+            if name == MKPFS_NAME:
+                action_status = ctk.CTkLabel(card, text="", font=ctk.CTkFont(size=11), text_color=MUTED)
+                action_status.pack(fill="x", padx=10, pady=(0, 2))
+
+                def _upgrade_mkpfs(target_v=new_v, as_lbl=action_status, s_badge=status_badge, vl=v_label):
+                    as_lbl.configure(text=f"⏳ Upgrading MkPFS to v{target_v} via pip into plugins/...", text_color=YELLOW)
+                    def _bg():
+                        ok, res = install_or_upgrade_mkpfs_plugin(target_v, log_fn=self.log)
+                        if ok:
+                            self.root.after(0, lambda: [
+                                as_lbl.configure(text=f"✓ MkPFS upgraded to v{res} (Plugin active)!", text_color=("#1a7a40", "#4ade80")),
+                                s_badge.configure(text="✓ Up to date", text_color=("#1a7a40", "#4ade80")),
+                                vl.configure(text=f"Installed: v{res} [Plugin]  (Latest on GitHub: v{target_v})"),
+                                self.log("OK", f"MkPFS successfully upgraded to v{res} in plugins directory.")
+                            ])
+                        else:
+                            self.root.after(0, lambda: [
+                                as_lbl.configure(text=f"⚠ Upgrade failed: {res[:80]}", text_color=RED),
+                                self.log("ERROR", f"MkPFS plugin upgrade failed: {res}")
+                            ])
+                    threading.Thread(target=_bg, daemon=True).start()
+
+                ctk.CTkButton(btn_row, text=f"⚡ Upgrade MkPFS to v{new_v}", width=190, fg_color=GREEN,
+                              hover_color=GREEN2, text_color="#061006", font=ctk.CTkFont(size=11, weight="bold"),
+                              command=_upgrade_mkpfs).pack(side="left", padx=(0, 8))
+                ctk.CTkButton(btn_row, text="🌐 Release", width=100, fg_color=CARD2, text_color=WHITE,
+                              hover_color=("#b0b0b0", "#2a2a2a"),
+                              command=lambda u=url: open_path(u)).pack(side="left")
+            else:
+                ctk.CTkButton(btn_row, text=f"⬇ Open {name} Release", width=180, fg_color=GREEN,
+                              hover_color=GREEN2, text_color="#061006", font=ctk.CTkFont(size=11, weight="bold"),
+                              command=lambda u=url: open_path(u)).pack(side="left")
 
         ctk.CTkButton(win, text="Close", fg_color=CARD2, text_color=WHITE,
                       hover_color=("#b0b0b0", "#2a2a2a"), width=90,

@@ -13,6 +13,9 @@ build/
 dist/
 build/
 
+# User plugins / independent component updates
+plugins/
+
 # App data / logs (generated at runtime)
 *.log
 *.json
