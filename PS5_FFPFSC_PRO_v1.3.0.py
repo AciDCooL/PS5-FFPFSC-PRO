@@ -1205,9 +1205,14 @@ class SettingsWindow(ctk.CTkToplevel):
         ctk.CTkLabel(comp, text="Pre-fill the archive password field for password-protected ZIPs/RARs/7zs.",
                       text_color=MUTED, font=ctk.CTkFont(size=11), anchor="w").pack(
             anchor="w", padx=14)
-        ctk.CTkEntry(comp, textvariable=self.app.password_var, show="*",
+        _pw_row = ctk.CTkFrame(comp, fg_color="transparent")
+        _pw_row.pack(fill="x", padx=14, pady=(4, 10))
+        ctk.CTkEntry(_pw_row, textvariable=self.app.password_var, show="*",
                       fg_color=CARD, border_color=BORDER2, text_color=WHITE).pack(
-            fill="x", padx=14, pady=(4, 10))
+            side="left", fill="x", expand=True, padx=(0, 8))
+        ctk.CTkButton(_pw_row, text="🔑 Manage Passwords", width=160, fg_color=CARD2, hover_color=BORDER2,
+                      text_color=WHITE, font=ctk.CTkFont(size=11),
+                      command=self.app.open_password_manager).pack(side="left")
 
         # USER INTERFACE
         self._section_label(scroll, "USER INTERFACE")
@@ -1288,6 +1293,154 @@ class SettingsWindow(ctk.CTkToplevel):
             self.app._remember_browse_dir(p)
 
 
+# ─── Password Manager Dialog ──────────────────────────────────────────────────
+
+class PasswordManagerDialog(ctk.CTkToplevel):
+    def __init__(self, parent, app):
+        super().__init__(parent)
+        self.app = app
+        self.title("Archive Password Manager")
+        self.geometry("520x460")
+        self.minsize(440, 360)
+        self.configure(fg_color=BLACK)
+        self.grab_set()
+
+        # Header
+        hdr = ctk.CTkFrame(self, fg_color="transparent")
+        hdr.pack(fill="x", padx=20, pady=(16, 6))
+        ctk.CTkLabel(hdr, text="🔑 Archive Passwords", font=ctk.CTkFont(size=16, weight="bold"),
+                     text_color=WHITE).pack(anchor="w")
+        ctk.CTkLabel(hdr, text="Configure preferred passwords for archives (.zip / .rar / .7z).\n"
+                               "They are attempted in top-to-bottom priority order automatically.",
+                     font=ctk.CTkFont(size=11), text_color=MUTED, justify="left").pack(anchor="w", pady=(2, 0))
+
+        # Add Row
+        add_frame = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=8)
+        add_frame.pack(fill="x", padx=20, pady=(4, 10))
+        self.new_pw_var = tk.StringVar()
+        self.entry = ctk.CTkEntry(add_frame, textvariable=self.new_pw_var, placeholder_text="Enter new password...",
+                                  fg_color=CARD, border_color=BORDER2, text_color=WHITE)
+        self.entry.pack(side="left", padx=(10, 8), pady=10, fill="x", expand=True)
+        self.entry.bind("<Return>", lambda _e: self._add_password())
+
+        ctk.CTkButton(add_frame, text="+ Add", width=80, fg_color=GREEN, hover_color=GREEN2,
+                      text_color="#061006", font=ctk.CTkFont(weight="bold"),
+                      command=self._add_password).pack(side="left", padx=(0, 10), pady=10)
+
+        # Content Frame: List on left, Action buttons on right
+        body = ctk.CTkFrame(self, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=20, pady=(0, 10))
+
+        list_card = ctk.CTkFrame(body, fg_color=CARD, border_width=1, border_color=BORDER2, corner_radius=6)
+        list_card.pack(side="left", fill="both", expand=True)
+
+        self.listbox = tk.Listbox(
+            list_card,
+            bg="#111116",
+            fg="#ffffff",
+            selectbackground="#1a7a40",
+            selectforeground="#ffffff",
+            activestyle="none",
+            borderwidth=0,
+            highlightthickness=0,
+            font=("Consolas", 11)
+        )
+        self.listbox.pack(side="left", fill="both", expand=True, padx=4, pady=4)
+        sb = tk.Scrollbar(list_card, orient="vertical", command=self.listbox.yview, bg="#111116")
+        sb.pack(side="right", fill="y")
+        self.listbox.config(yscrollcommand=sb.set)
+
+        # Right Action Buttons: Move Up, Move Down, Delete, Clear
+        btn_col = ctk.CTkFrame(body, fg_color="transparent")
+        btn_col.pack(side="left", fill="y", padx=(10, 0))
+
+        ctk.CTkButton(btn_col, text="▲ Move Up", width=100, fg_color=CARD2, hover_color=BORDER2,
+                      text_color=WHITE, command=self._move_up).pack(pady=(0, 6))
+        ctk.CTkButton(btn_col, text="▼ Move Down", width=100, fg_color=CARD2, hover_color=BORDER2,
+                      text_color=WHITE, command=self._move_down).pack(pady=(0, 6))
+        ctk.CTkButton(btn_col, text="🗑 Remove", width=100, fg_color="#441a1a", hover_color="#662222",
+                      text_color="#ff8888", command=self._remove).pack(pady=(0, 6))
+        ctk.CTkButton(btn_col, text="Clear All", width=100, fg_color=CARD2, hover_color=BORDER2,
+                      text_color=MUTED, command=self._clear_all).pack(pady=(0, 6))
+
+        # Bottom row
+        bot = ctk.CTkFrame(self, fg_color="transparent")
+        bot.pack(fill="x", padx=20, pady=(0, 16))
+        self.count_lbl = ctk.CTkLabel(bot, text="", text_color=MUTED, font=ctk.CTkFont(size=11))
+        self.count_lbl.pack(side="left")
+
+        ctk.CTkButton(bot, text="Done", width=90, fg_color=GREEN, hover_color=GREEN2,
+                      text_color="#061006", command=self.destroy).pack(side="right")
+
+        self._refresh()
+
+    def _refresh(self, select_idx=None):
+        self.listbox.delete(0, "end")
+        for i, pw in enumerate(self.app.archive_passwords):
+            self.listbox.insert("end", f" #{i+1:02d}  {pw}")
+        count = len(self.app.archive_passwords)
+        self.count_lbl.configure(text=f"{count} password(s) configured")
+        if select_idx is not None and 0 <= select_idx < count:
+            self.listbox.selection_clear(0, "end")
+            self.listbox.selection_set(select_idx)
+            self.listbox.activate(select_idx)
+            self.listbox.see(select_idx)
+
+    def _save(self):
+        save_settings({"archive_passwords": self.app.archive_passwords})
+
+    def _add_password(self):
+        val = self.new_pw_var.get().strip()
+        if not val:
+            return
+        if val in self.app.archive_passwords:
+            idx = self.app.archive_passwords.index(val)
+            self._refresh(select_idx=idx)
+            self.new_pw_var.set("")
+            return
+        self.app.archive_passwords.append(val)
+        self._save()
+        self.new_pw_var.set("")
+        self._refresh(select_idx=len(self.app.archive_passwords) - 1)
+
+    def _move_up(self):
+        sel = self.listbox.curselection()
+        if not sel or sel[0] == 0:
+            return
+        idx = sel[0]
+        pws = self.app.archive_passwords
+        pws[idx - 1], pws[idx] = pws[idx], pws[idx - 1]
+        self._save()
+        self._refresh(select_idx=idx - 1)
+
+    def _move_down(self):
+        sel = self.listbox.curselection()
+        if not sel or sel[0] >= len(self.app.archive_passwords) - 1:
+            return
+        idx = sel[0]
+        pws = self.app.archive_passwords
+        pws[idx + 1], pws[idx] = pws[idx], pws[idx + 1]
+        self._save()
+        self._refresh(select_idx=idx + 1)
+
+    def _remove(self):
+        sel = self.listbox.curselection()
+        if not sel:
+            return
+        idx = sel[0]
+        del self.app.archive_passwords[idx]
+        self._save()
+        new_sel = min(idx, len(self.app.archive_passwords) - 1) if self.app.archive_passwords else None
+        self._refresh(select_idx=new_sel)
+
+    def _clear_all(self):
+        if not self.app.archive_passwords:
+            return
+        self.app.archive_passwords.clear()
+        self._save()
+        self._refresh()
+
+
 # ─── Archive Extractor ─────────────────────────────────────────────────────────
 
 class ArchiveExtractor:
@@ -1303,28 +1456,64 @@ class ArchiveExtractor:
 
     @staticmethod
     def extract(archive: Path, dest_root: Path, log_fn=None, progress_fn=None,
-                password: str = "") -> Path:
+                password: str = "", candidate_passwords: list[str] | None = None) -> Path:
         """Extract *archive* under *dest_root/<stem>* and return the extracted root.
         progress_fn(pct, filename) is called periodically.
-        password is used for encrypted archives (ZIP/RAR/7z)."""
+        Tries *password* first, then retries through *candidate_passwords* in priority order."""
         dest = dest_root / archive.stem
-        dest.mkdir(parents=True, exist_ok=True)
         suffix = archive.suffix.lower()
-        if log_fn:
-            log_fn("INFO", f"Extracting {archive.name} → {dest}"
-                   + (" [password-protected]" if password else ""))
-        if suffix == ".zip":
-            ArchiveExtractor._zip(archive, dest, log_fn, progress_fn, password)
-        elif suffix == ".rar":
-            ArchiveExtractor._rar(archive, dest, log_fn, progress_fn, password)
-        elif suffix == ".7z":
-            ArchiveExtractor._sevenz(archive, dest, log_fn, progress_fn, password)
-        else:
-            raise ValueError(f"Unsupported archive format: {archive.suffix}")
-        game_root = ArchiveExtractor._find_root(dest)
-        if log_fn:
-            log_fn("OK", f"Extracted to: {game_root}")
-        return game_root
+
+        # Build candidate password list preserving priority order
+        candidates: list[str] = []
+        if password and password.strip():
+            candidates.append(password.strip())
+        if candidate_passwords:
+            for p in candidate_passwords:
+                p_clean = str(p).strip()
+                if p_clean and p_clean not in candidates:
+                    candidates.append(p_clean)
+        if not candidates:
+            candidates.append("")
+
+        total_cands = len(candidates)
+        last_err: Exception | None = None
+
+        for idx, pwd in enumerate(candidates):
+            masked = (pwd[:2] + "*" * (len(pwd) - 2)) if len(pwd) > 2 else ("*" * len(pwd) if pwd else "(none)")
+            if log_fn:
+                if total_cands > 1:
+                    log_fn("INFO", f"Extracting {archive.name} (attempt {idx + 1}/{total_cands} with password: {masked})")
+                else:
+                    log_fn("INFO", f"Extracting {archive.name} -> {dest}" + (f" [password: {masked}]" if pwd else ""))
+
+            # Clean destination before each attempt so failed extractions don't leave corrupt partial files
+            if dest.exists():
+                shutil.rmtree(dest, ignore_errors=True)
+            dest.mkdir(parents=True, exist_ok=True)
+
+            try:
+                if suffix == ".zip":
+                    ArchiveExtractor._zip(archive, dest, log_fn, progress_fn, pwd)
+                elif suffix == ".rar":
+                    ArchiveExtractor._rar(archive, dest, log_fn, progress_fn, pwd)
+                elif suffix == ".7z":
+                    ArchiveExtractor._sevenz(archive, dest, log_fn, progress_fn, pwd)
+                else:
+                    raise ValueError(f"Unsupported archive format: {archive.suffix}")
+
+                game_root = ArchiveExtractor._find_root(dest)
+                if log_fn:
+                    if pwd:
+                        log_fn("OK", f"Archive extracted successfully using password: {masked}")
+                    else:
+                        log_fn("OK", f"Extracted to: {game_root}")
+                return game_root
+            except Exception as exc:
+                last_err = exc
+                if idx + 1 < total_cands and log_fn:
+                    log_fn("WARN", f"Password attempt {idx + 1} failed: {exc}. Retrying next password in list...")
+
+        raise RuntimeError(f"Extraction failed after trying {total_cands} candidate password(s). Last error: {last_err}")
 
     # ── format handlers ────────────────────────────────────────────────────────
 
@@ -2282,6 +2471,8 @@ class App:
         self._saved_compression_level = settings.get("compression_level", 9)
         self._saved_cpu_count = settings.get("cpu_count", 0)
         self._saved_block_size = settings.get("block_size", "auto")
+        self.archive_passwords: list[str] = list(settings.get("archive_passwords", []))
+        self._pw_win = None
 
     def _show_first_run_wizard(self):
         wiz = FirstRunWizard(self.root)
@@ -2497,11 +2688,17 @@ class App:
                       text_color=MUTED, font=ctk.CTkFont(size=11),
                       justify="left"
                      ).grid(row=7, column=0, sticky="w", padx=14, pady=(0, 2))
-        _pw_entry = ctk.CTkEntry(left, textvariable=self.password_var,
+        pw_row = ctk.CTkFrame(left, fg_color="transparent")
+        pw_row.grid(row=8, column=0, sticky="ew", padx=14, pady=(0, 4))
+        pw_row.grid_columnconfigure(0, weight=1)
+        _pw_entry = ctk.CTkEntry(pw_row, textvariable=self.password_var,
                       placeholder_text="Archive password (if required)",
                       show="*", fg_color=CARD, border_color=BORDER2,
                       text_color=WHITE)
-        _pw_entry.grid(row=8, column=0, sticky="ew", padx=14, pady=(0, 4))
+        _pw_entry.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        ctk.CTkButton(pw_row, text="🔑 List", width=75, fg_color=CARD2, hover_color=BORDER2,
+                      text_color=WHITE, font=ctk.CTkFont(size=11),
+                      command=self.open_password_manager).grid(row=0, column=1)
         def _pw_right_click(event):
             import tkinter.font as _tkfont
             _mf = _tkfont.Font(family="Segoe UI", size=14)
@@ -3515,6 +3712,12 @@ class App:
             return
         self._settings_win = SettingsWindow(self.root, self)
 
+    def open_password_manager(self):
+        if getattr(self, "_pw_win", None) and self._pw_win.winfo_exists():
+            self._pw_win.focus()
+            return
+        self._pw_win = PasswordManagerDialog(self.root, self)
+
     def _show_changelog(self):
         win = ctk.CTkToplevel(self.root)
         win.title(f"{APP_NAME} — Changelog")
@@ -4090,13 +4293,15 @@ v1.0
                 )
 
         archive_password = self.password_var.get().strip()
+        candidates = list(self.archive_passwords)
 
         def worker():
             try:
                 extracted_root = ArchiveExtractor.extract(
                     archive, extract_root,
                     log_fn=self.log, progress_fn=_progress,
-                    password=archive_password
+                    password=archive_password,
+                    candidate_passwords=candidates
                 )
                 self.status_update("Scanning", "Extraction done — scanning for games…",
                                     "Scanning Files", 98, 98, "—", "—", "—")
@@ -4152,12 +4357,15 @@ v1.0
                                     "Scanning Files", pct, pct, "—", "—", "—")
 
         pwd = self.password_var.get().strip()
+        candidates = list(self.archive_passwords)
 
         def worker():
             try:
                 extracted_root = ArchiveExtractor.extract(
                     archive, extract_root,
-                    log_fn=self.log, progress_fn=_progress, password=pwd
+                    log_fn=self.log, progress_fn=_progress,
+                    password=pwd,
+                    candidate_passwords=candidates
                 )
                 games = find_game_folders(extracted_root)
                 game_path = games[0] if games else extracted_root
