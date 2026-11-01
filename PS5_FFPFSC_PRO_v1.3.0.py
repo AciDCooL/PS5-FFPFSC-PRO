@@ -12,9 +12,6 @@ import threading
 import subprocess
 import shutil
 from pathlib import Path
-from tkinter import filedialog, messagebox
-import tkinter as tk
-
 # Force UTF-8 stdio to avoid cp1252 / cp1250 UnicodeEncodeError on Windows
 for _stream in (sys.stdout, sys.stderr):
     if _stream and hasattr(_stream, "reconfigure"):
@@ -25,20 +22,48 @@ for _stream in (sys.stdout, sys.stderr):
 os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 os.environ.setdefault("PYTHONUTF8", "1")
 
-try:
-    import customtkinter as ctk
-except ImportError:
-    raise SystemExit("Missing customtkinter. Run: py -m pip install customtkinter")
+# Check CLI arguments before attempting GUI imports to allow running headlessly in containers
+_IS_HEADLESS_OR_WEB = any(arg in sys.argv for arg in ("--web", "-w", "--headless"))
+if not _IS_HEADLESS_OR_WEB and sys.platform.startswith("linux"):
+    if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        _IS_HEADLESS_OR_WEB = True
 
-# CTkButton.destroy() references self._font which is never set when __init__ raises
-# mid-way (bad color arg) or due to Python 3.14 / CTk 5.2.2 incompatibility.
-# Patch it globally so any missing _font is treated as None (no callback to remove).
-_orig_ctk_btn_destroy = ctk.CTkButton.destroy
-def _safe_ctk_btn_destroy(self):
-    if not hasattr(self, "_font"):
-        self._font = None
-    _orig_ctk_btn_destroy(self)
-ctk.CTkButton.destroy = _safe_ctk_btn_destroy
+ctk = None
+tk = None
+filedialog = None
+messagebox = None
+
+if not _IS_HEADLESS_OR_WEB:
+    try:
+        from tkinter import filedialog, messagebox
+        import tkinter as tk
+        import customtkinter as ctk
+
+        # CTkButton.destroy() patch
+        _orig_ctk_btn_destroy = ctk.CTkButton.destroy
+        def _safe_ctk_btn_destroy(self):
+            if not hasattr(self, "_font"):
+                self._font = None
+            _orig_ctk_btn_destroy(self)
+        ctk.CTkButton.destroy = _safe_ctk_btn_destroy
+    except Exception:
+        _IS_HEADLESS_OR_WEB = True
+        ctk = None
+        tk = None
+
+if ctk is None or tk is None:
+    class _DummyWidget:
+        def __init__(self, *args, **kwargs): pass
+        def __getattr__(self, name): return lambda *args, **kwargs: None
+    class _DummyModule:
+        StringVar = lambda *a, **k: None
+        BooleanVar = lambda *a, **k: None
+        IntVar = lambda *a, **k: None
+        def __getattr__(self, name): return _DummyWidget
+    ctk = _DummyModule()
+    tk = _DummyModule()
+    filedialog = _DummyModule()
+    messagebox = _DummyModule()
 
 try:
     from PIL import Image, ImageTk
@@ -6721,16 +6746,31 @@ v1.0
             pass
 
 
-if _HAS_DND:
+if _HAS_DND and hasattr(ctk, "CTk"):
     class _CTkDnD(ctk.CTk, TkinterDnD.DnDWrapper):
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
             self.TkdndVersion = TkinterDnD._require(self)
-else:
+elif hasattr(ctk, "CTk"):
     _CTkDnD = ctk.CTk
+else:
+    _CTkDnD = None
 
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(description=f"{APP_NAME} v{APP_VERSION}")
+    parser.add_argument("--web", "-w", action="store_true", help="Launch WebUI mode")
+    parser.add_argument("--headless", action="store_true", help="Run headlessly in container/server mode (starts WebUI)")
+    parser.add_argument("--host", default=os.getenv("HOST", "0.0.0.0"), help="WebUI host address (default: 0.0.0.0)")
+    parser.add_argument("--port", "-p", type=int, default=int(os.getenv("PORT", "8080")), help="WebUI port (default: 8080)")
+    args, unknown = parser.parse_known_args()
+
+    if args.web or args.headless or _IS_HEADLESS_OR_WEB or _CTkDnD is None:
+        from backend.web import run_web_server
+        run_web_server(host=args.host, port=args.port)
+        return
+
     ensure_app_dir()
     root = _CTkDnD()
     App(root)
