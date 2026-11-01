@@ -6,6 +6,13 @@ a = Analysis(
     binaries=[],
     datas=[('backend', 'backend')],
     hiddenimports=[
+        # Web & Core backend
+        'backend',
+        'backend.core',
+        'backend.web',
+        'backend.cli',
+        'http.server',
+        'urllib.parse',
         # Archive support — imported inside try/except so PyInstaller misses them
         'py7zr',
         'py7zr.helpers',
