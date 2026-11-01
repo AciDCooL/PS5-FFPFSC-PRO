@@ -257,6 +257,27 @@ def format_eta(eta_str: str) -> str:
         return eta_str
 
 
+def parse_speed_bps(speed_str: str) -> float:
+    """Parse a speed string like '290.95 MB/s' or '1.2 GB/s' into bytes per second."""
+    if not speed_str or speed_str in ("—", "-", ""):
+        return 0.0
+    m = re.search(r"([0-9.]+)\s*(GB|MB|KB|B)/s", speed_str, re.I)
+    if not m:
+        return 0.0
+    try:
+        val = float(m.group(1))
+        unit = m.group(2).upper()
+        if unit == "GB":
+            return val * (1024 ** 3)
+        elif unit == "MB":
+            return val * (1024 ** 2)
+        elif unit == "KB":
+            return val * 1024
+        return val
+    except Exception:
+        return 0.0
+
+
 def get_free_space(path: Path) -> int:
     try:
         target = path if path.exists() else path.parent
@@ -2322,7 +2343,7 @@ class CLIWorker(threading.Thread):
             label = prog.group("label").strip()
             stage = self._stage_from_label(label, line)
 
-            sp = re.search(r"@\s*([0-9.]+\s*(?:GB|MB)/s)", label, re.I)
+            sp = re.search(r"@\s*([0-9.]+\s*(?:GB|MB|KB|B)/s)", label, re.I)
             if sp:
                 self.speed = sp.group(1)
 
@@ -2592,6 +2613,9 @@ class App:
         self._saved_block_size = settings.get("block_size", "auto")
         self.archive_passwords: list[str] = list(settings.get("archive_passwords", []))
         self._pw_win = None
+        self._queue_start_time: float = 0.0
+        self._queue_initial_bytes: int = 0
+        self._last_speed_bps: float = 0.0
 
     def _show_first_run_wizard(self):
         wiz = FirstRunWizard(self.root)
@@ -2799,21 +2823,28 @@ class App:
         )
         self.batch_counter_label.grid(row=4, column=0, sticky="w", padx=14, pady=(0, 0))
 
+        self.queue_eta_var = tk.StringVar(value="")
+        self.queue_eta_label = ctk.CTkLabel(
+            left, textvariable=self.queue_eta_var,
+            text_color=("#1a7a40", "#4ade80"), font=ctk.CTkFont(size=12, weight="bold")
+        )
+        self.queue_eta_label.grid(row=5, column=0, sticky="w", padx=14, pady=(2, 2))
+
         if _HAS_DND:
             ctk.CTkLabel(left, text="↓ Drag & drop supported", text_color=MUTED,
-                          font=ctk.CTkFont(size=11)).grid(row=5, column=0, sticky="w", padx=14, pady=(0, 4))
+                          font=ctk.CTkFont(size=11)).grid(row=6, column=0, sticky="w", padx=14, pady=(0, 4))
 
-        # ── row 6: Archive password ───────────────────────────────────────────
+        # ── row 7: Archive password ───────────────────────────────────────────
         ctk.CTkLabel(left, text="ARCHIVE PASSWORD (OPTIONAL)",
                       font=ctk.CTkFont(size=13, weight="bold"),
-                      text_color=WHITE).grid(row=6, column=0, sticky="w", padx=14, pady=(10, 2))
+                      text_color=WHITE).grid(row=7, column=0, sticky="w", padx=14, pady=(10, 2))
         ctk.CTkLabel(left,
                       text="Only needed if your ZIP / RAR / 7z is password-protected.",
                       text_color=MUTED, font=ctk.CTkFont(size=11),
                       justify="left"
-                     ).grid(row=7, column=0, sticky="w", padx=14, pady=(0, 2))
+                     ).grid(row=8, column=0, sticky="w", padx=14, pady=(0, 2))
         pw_row = ctk.CTkFrame(left, fg_color="transparent")
-        pw_row.grid(row=8, column=0, sticky="ew", padx=14, pady=(0, 4))
+        pw_row.grid(row=9, column=0, sticky="ew", padx=14, pady=(0, 4))
         pw_row.grid_columnconfigure(0, weight=1)
         _pw_entry = ctk.CTkEntry(pw_row, textvariable=self.password_var,
                       placeholder_text="Archive password (if required)",
@@ -2838,9 +2869,9 @@ class App:
             m.tk_popup(event.x_root, event.y_root)
         _pw_entry.bind("<Button-3>", _pw_right_click)
 
-        # ── row 9: Options & Settings button ──────────────────────────────────
+        # ── row 10: Options & Settings button ──────────────────────────────────
         opt_box = ctk.CTkFrame(left, fg_color=CARD, corner_radius=8, border_width=1, border_color=BORDER)
-        opt_box.grid(row=9, column=0, sticky="ew", padx=14, pady=(14, 10))
+        opt_box.grid(row=10, column=0, sticky="ew", padx=14, pady=(14, 10))
         opt_box.grid_columnconfigure(0, weight=1)
 
         self._button(
@@ -2866,9 +2897,14 @@ class App:
         progress.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(progress, text="OVERALL PROGRESS", text_color=WHITE,
                       font=ctk.CTkFont(size=15, weight="bold")).grid(row=0, column=0, sticky="w", padx=14, pady=(12, 2))
+        _op_right = ctk.CTkFrame(progress, fg_color="transparent")
+        _op_right.grid(row=0, column=1, sticky="e", padx=14, pady=(8, 0))
+        self.overall_eta_var = tk.StringVar(value="")
+        ctk.CTkLabel(_op_right, textvariable=self.overall_eta_var, text_color=MUTED,
+                      font=ctk.CTkFont(size=12, weight="bold")).pack(side="left", padx=(0, 10))
         self.overall_pct_var = tk.StringVar(value="0%")
-        ctk.CTkLabel(progress, textvariable=self.overall_pct_var, text_color=("#1a7a40", "#4ade80"),
-                      font=ctk.CTkFont(size=24, weight="bold")).grid(row=0, column=1, sticky="e", padx=14)
+        ctk.CTkLabel(_op_right, textvariable=self.overall_pct_var, text_color=("#1a7a40", "#4ade80"),
+                      font=ctk.CTkFont(size=24, weight="bold")).pack(side="left")
         self.overall_bar = ctk.CTkProgressBar(progress, progress_color=GREEN, fg_color=("#cccccc", "#242424"), height=14)
         self.overall_bar.grid(row=1, column=0, columnspan=2, sticky="ew", padx=14, pady=(0, 10))
         self.overall_bar.set(0)
@@ -3103,12 +3139,13 @@ class App:
                       font=ctk.CTkFont(size=13, weight="bold")).pack(anchor="w", padx=12, pady=(10, 4))
         self.speed_var       = tk.StringVar(value="Speed: —")
         self.elapsed_var     = tk.StringVar(value="Elapsed: 00:00")
-        self.eta_var         = tk.StringVar(value="ETA: —")
+        self.eta_var         = tk.StringVar(value="Game ETA: —")
+        self.stats_queue_eta_var = tk.StringVar(value="Queue ETA: —")
         self.saved_var       = tk.StringVar(value="Saved: —")
         self.ratio_var       = tk.StringVar(value="Compression: —")
         self.rating_var      = tk.StringVar(value="Rating: —")
         self.temp_space_var  = tk.StringVar(value="Temp Needed: —")
-        for v in [self.speed_var, self.elapsed_var, self.eta_var,
+        for v in [self.speed_var, self.elapsed_var, self.eta_var, self.stats_queue_eta_var,
                   self.saved_var, self.ratio_var, self.rating_var, self.temp_space_var]:
             ctk.CTkLabel(stats, textvariable=v, text_color=WHITE, anchor="w",
                           font=ctk.CTkFont(size=11)).pack(anchor="w", padx=12, pady=2)
@@ -4849,10 +4886,54 @@ v1.0
             msg += f" ({errors} item(s) could not be removed)"
         self.log("OK", msg)
 
-    # ── Feature 4: Batch auto-advance ─────────────────────────────────────────
+    # ── Feature 4: Batch auto-advance & Queue ETA ─────────────────────────────
+    def calculate_queue_eta(self, current_overall_pct: float, current_speed_str: str) -> str:
+        """Calculate estimated remaining time for the entire queue based on current speed."""
+        if not self.queue:
+            return "—"
+
+        current_item = self.queue[0]
+        current_sz = getattr(current_item, "size", 0) or 0
+        pct_remaining = max(0.0, min(1.0, 1.0 - (current_overall_pct / 100.0)))
+        current_bytes_left = current_sz * pct_remaining
+
+        remaining_items_bytes = sum(getattr(it, "size", 0) or 0 for it in self.queue[1:])
+        total_remaining_bytes = current_bytes_left + remaining_items_bytes
+
+        if total_remaining_bytes <= 0:
+            return "00:00"
+
+        # Parse speed
+        parsed_speed = parse_speed_bps(current_speed_str)
+        if parsed_speed > 0:
+            if getattr(self, "_last_speed_bps", 0.0) <= 0:
+                self._last_speed_bps = parsed_speed
+            else:
+                self._last_speed_bps = self._last_speed_bps * 0.7 + parsed_speed * 0.3
+
+        effective_speed = getattr(self, "_last_speed_bps", 0.0)
+
+        # Fallback to overall queue elapsed throughput if speed is not reported yet
+        if effective_speed <= 0:
+            q_start = getattr(self, "_queue_start_time", 0.0)
+            init_bytes = getattr(self, "_queue_initial_bytes", 0)
+            if q_start > 0 and init_bytes > 0:
+                elapsed = time.time() - q_start
+                done_bytes = max(0, init_bytes - total_remaining_bytes)
+                if elapsed > 5 and done_bytes > 0:
+                    effective_speed = done_bytes / elapsed
+
+        if effective_speed <= 0:
+            return "Calculating…"
+
+        eta_secs = int(total_remaining_bytes / effective_speed)
+        return format_duration(eta_secs)
+
     def _update_batch_counter(self):
         if not self._batch_running:
             self.batch_counter_var.set("")
+            self.queue_eta_var.set("")
+            self.overall_eta_var.set("")
             return
         current = self._batch_done + self._batch_failed + 1
         self.batch_counter_var.set(
@@ -4865,8 +4946,14 @@ v1.0
             self._batch_running = False
             self.start_btn.configure(state="normal")
             self.cancel_btn.configure(state="disabled")
+            self._queue_start_time = 0.0
+            self._last_speed_bps = 0.0
             self._update_batch_counter()
             return
+        if getattr(self, "_queue_start_time", 0.0) <= 0:
+            self._queue_start_time = time.time()
+        if getattr(self, "_queue_initial_bytes", 0) <= 0:
+            self._queue_initial_bytes = sum(getattr(it, "size", 0) or 0 for it in self.queue)
         item = self.queue[0]
         self.update_game_details(item)   # refreshes art + space stats for next game
 
@@ -4946,6 +5033,11 @@ v1.0
         total = self._batch_total
         done  = self._batch_done
         fail  = self._batch_failed
+        self._queue_start_time = 0.0
+        self._last_speed_bps = 0.0
+        self.queue_eta_var.set("")
+        self.overall_eta_var.set("")
+        self.stats_queue_eta_var.set("Queue ETA: —")
         self.batch_counter_var.set(
             f"Batch complete  |  ✓ {done}/{total}  ✗ {fail}/{total}"
         )
@@ -5302,6 +5394,9 @@ v1.0
         self._batch_done    = 0
         self._batch_failed  = 0
         self._batch_running = self._batch_total > 0
+        self._queue_start_time = time.time()
+        self._queue_initial_bytes = sum(getattr(it, "size", 0) or 0 for it in self.queue)
+        self._last_speed_bps = 0.0
         self._update_batch_counter()
 
         self._last_cmd_str = " ".join(cmd)
@@ -5317,6 +5412,11 @@ v1.0
 
     def cancel(self):
         self.cancel_requested = True
+        self._queue_start_time = 0.0
+        self._last_speed_bps = 0.0
+        self.queue_eta_var.set("")
+        self.overall_eta_var.set("")
+        self.stats_queue_eta_var.set("Queue ETA: —")
         self.status_update("Cancelling", "Cancel requested.", "Cancelling", 0, 0, "—", "—", "—")
 
     def status_update(self, title, detail, stage, stage_pct, overall_pct, elapsed, speed, eta):
@@ -6441,8 +6541,25 @@ v1.0
                 self.overall_bar.set(max(0, min(1, overall_pct / 100)))
                 self.speed_var.set(f"Speed: {speed}")
                 self.elapsed_var.set(f"Elapsed: {elapsed}")
-                self.eta_var.set(f"ETA: {eta}")
-                self.header_status_var.set(f"v{APP_VERSION}  |  Stage: {stage}")
+
+                # Calculate Queue ETA based on current speed and queue remaining size
+                queue_eta = self.calculate_queue_eta(overall_pct, speed)
+                if self._batch_total > 1 or len(self.queue) > 1:
+                    self.eta_var.set(f"Game ETA: {eta}")
+                    self.stats_queue_eta_var.set(f"Queue ETA: {queue_eta}")
+                    self.queue_eta_var.set(f"⏳ Queue ETA: {queue_eta}")
+                    self.overall_eta_var.set(f"Queue ETA: {queue_eta}")
+                    current_idx = self._batch_done + self._batch_failed + 1
+                    self.header_status_var.set(f"v{APP_VERSION}  |  Game {current_idx}/{self._batch_total}  |  Queue ETA: {queue_eta}")
+                else:
+                    disp_eta = eta if eta != "—" else queue_eta
+                    self.eta_var.set(f"ETA: {disp_eta}")
+                    self.stats_queue_eta_var.set(f"Queue ETA: {disp_eta}")
+                    if disp_eta != "—":
+                        self.queue_eta_var.set(f"⏳ ETA: {disp_eta}")
+                        self.overall_eta_var.set(f"ETA: {disp_eta}")
+                    self.header_status_var.set(f"v{APP_VERSION}  |  Stage: {stage}")
+
                 self.footer_var.set(f"● {title}")
                 self.update_stages_display(stage, stage_pct)
         except queue.Empty:
@@ -6481,6 +6598,11 @@ v1.0
                     self._batch_running = False
                     self.start_btn.configure(state="normal")
                     self.cancel_btn.configure(state="disabled")
+                    self._queue_start_time = 0.0
+                    self._last_speed_bps = 0.0
+                    self.queue_eta_var.set("")
+                    self.overall_eta_var.set("")
+                    self.stats_queue_eta_var.set("Queue ETA: —")
                     self.update_queue_box()
                     self._update_batch_counter()
                     if self._batch_total > 1:
@@ -6530,6 +6652,11 @@ v1.0
                     self._batch_running = False
                     self.start_btn.configure(state="normal")
                     self.cancel_btn.configure(state="disabled")
+                    self._queue_start_time = 0.0
+                    self._last_speed_bps = 0.0
+                    self.queue_eta_var.set("")
+                    self.overall_eta_var.set("")
+                    self.stats_queue_eta_var.set("Queue ETA: —")
                     self.update_queue_box()
                     self._update_batch_counter()
                     if self._batch_total > 1:
