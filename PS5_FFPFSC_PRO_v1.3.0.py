@@ -75,6 +75,15 @@ GITHUB_REPO         = "KINGDKAK/PS5-FFPFSC-PRO"
 GITHUB_API_LATEST   = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 GITHUB_RELEASES_URL = f"https://github.com/{GITHUB_REPO}/releases"
 
+MKPFS_REPO          = "PSBrew/MkPFS"
+MKPFS_API_LATEST    = f"https://api.github.com/repos/{MKPFS_REPO}/releases/latest"
+MKPFS_RELEASES_URL  = f"https://github.com/{MKPFS_REPO}/releases"
+
+FFPFSC_REPO         = "bizkut/ps5-ffpfs-cli"
+FFPFSC_API_LATEST   = f"https://api.github.com/repos/{FFPFSC_REPO}/releases/latest"
+FFPFSC_RELEASES_URL = f"https://github.com/{FFPFSC_REPO}/releases"
+FFPFSC_VERSION      = "1.1.9"
+
 COMMUNITY_URL = (
     "https://script.google.com/macros/s/"
     "AKfycbzPAg4-N2RFBel9oRfyxdBhCH4OylrkpHrOBfPcn31CV1l4PMRaKEwDWztdrDH2p4pM/exec"
@@ -1237,8 +1246,8 @@ class SettingsWindow(ctk.CTkToplevel):
         about = ctk.CTkFrame(scroll, fg_color=PANEL, corner_radius=8)
         about.pack(fill="x", pady=(4, 12))
         for line in [
-            f"Version:  {APP_VERSION}",
-            f"Backend:  {BACKEND_NAME}",
+            f"Version:  {APP_NAME} v{APP_VERSION}",
+            f"Backend:  {BACKEND_NAME} (v{FFPFSC_VERSION})",
             f"MkPFS:    {MKPFS_NAME} v{MKPFS_VERSION}",
             f"Config:   {SETTINGS_FILE}",
             f"History:  {HISTORY_FILE}",
@@ -3894,31 +3903,51 @@ v1.0
         import json as _json
         import threading
 
-        def _worker():
+        def _fetch_release(api_url):
             try:
-                req = _ur.Request(GITHUB_API_LATEST,
+                req = _ur.Request(api_url,
                                   headers={"User-Agent": f"PS5-FFPFSC-PRO/{APP_VERSION}",
                                            "Accept": "application/vnd.github+json"})
                 with _ur.urlopen(req, timeout=10) as resp:
                     data = _json.loads(resp.read().decode("utf-8"))
+                tag = data.get("tag_name", "").lstrip("v")
+                notes = data.get("body", "").strip()
+                html_url = data.get("html_url", "")
+                return tag, notes, html_url
+            except Exception:
+                return None, "", ""
 
-                tag      = data.get("tag_name", "").lstrip("v")
-                notes    = data.get("body", "").strip()
-                html_url = data.get("html_url", GITHUB_RELEASES_URL)
+        def _ver(v):
+            try:
+                return tuple(int(x) for x in re.findall(r"\d+", str(v)))
+            except Exception:
+                return (0,)
 
-                def _ver(v):
-                    try:
-                        return tuple(int(x) for x in v.split("."))
-                    except Exception:
-                        return (0,)
+        def _worker():
+            try:
+                # Check Main App, MkPFS, and Bizkut FFPFSC on GitHub
+                app_tag, app_notes, app_url = _fetch_release(GITHUB_API_LATEST)
+                mkpfs_tag, mkpfs_notes, mkpfs_url = _fetch_release(MKPFS_API_LATEST)
+                ffpfsc_tag, ffpfsc_notes, ffpfsc_url = _fetch_release(FFPFSC_API_LATEST)
 
-                if _ver(tag) > _ver(APP_VERSION):
-                    self.root.after(0, lambda: self._show_update_dialog(tag, notes, html_url))
+                updates = []
+                if app_tag and _ver(app_tag) > _ver(APP_VERSION):
+                    updates.append((APP_NAME, APP_VERSION, app_tag, app_url or GITHUB_RELEASES_URL, app_notes))
+                if mkpfs_tag and _ver(mkpfs_tag) > _ver(MKPFS_VERSION):
+                    updates.append((MKPFS_NAME, MKPFS_VERSION, mkpfs_tag, mkpfs_url or MKPFS_RELEASES_URL, mkpfs_notes))
+                if ffpfsc_tag and _ver(ffpfsc_tag) > _ver(FFPFSC_VERSION):
+                    updates.append(("Bizkut FFPFSC Backend", FFPFSC_VERSION, ffpfsc_tag, ffpfsc_url or FFPFSC_RELEASES_URL, ffpfsc_notes))
+
+                if updates:
+                    self.root.after(0, lambda: self._show_update_dialog(updates))
                 elif not silent:
-                    self.root.after(0, lambda: messagebox.showinfo(
-                        "Up to date",
-                        f"You're running the latest version ({APP_VERSION})."
-                    ))
+                    summary = (
+                        f"All components are up to date!\n\n"
+                        f"• {APP_NAME}: v{APP_VERSION} (Latest: v{app_tag or APP_VERSION})\n"
+                        f"• {MKPFS_NAME}: v{MKPFS_VERSION} (Latest: v{mkpfs_tag or MKPFS_VERSION})\n"
+                        f"• Bizkut Backend: v{FFPFSC_VERSION} (Latest: v{ffpfsc_tag or FFPFSC_VERSION})"
+                    )
+                    self.root.after(0, lambda: messagebox.showinfo("Up to date", summary))
             except Exception as exc:
                 if not silent:
                     self.root.after(0, lambda: messagebox.showerror(
@@ -3928,11 +3957,11 @@ v1.0
 
         threading.Thread(target=_worker, daemon=True).start()
 
-    def _show_update_dialog(self, new_version: str, notes: str, url: str):
+    def _show_update_dialog(self, updates: list):
         win = ctk.CTkToplevel(self.root)
-        win.title("Update Available")
-        win.geometry("520x420")
-        win.resizable(False, False)
+        win.title("Component Updates Available")
+        win.geometry("580x480")
+        win.minsize(500, 400)
         win.grab_set()
         win.configure(fg_color=BLACK)
 
@@ -3944,26 +3973,46 @@ v1.0
             win.destroy()
 
         win.protocol("WM_DELETE_WINDOW", _upd_close)
-        ctk.CTkLabel(win, text=f"Update Available  —  v{new_version}",
-                      text_color=GREEN, font=ctk.CTkFont(size=15, weight="bold")).pack(pady=(16, 2))
-        ctk.CTkLabel(win, text=f"You have v{APP_VERSION}",
-                      text_color=MUTED, font=ctk.CTkFont(size=11)).pack(pady=(0, 8))
+        ctk.CTkLabel(win, text="Updates Available on GitHub",
+                      text_color=GREEN, font=ctk.CTkFont(size=16, weight="bold")).pack(pady=(16, 2))
+        ctk.CTkLabel(win, text=f"{len(updates)} component(s) have newer releases available on GitHub:",
+                      text_color=MUTED, font=ctk.CTkFont(size=12)).pack(pady=(0, 10))
 
-        box = ctk.CTkTextbox(win, fg_color=PANEL, border_width=1, border_color=BORDER,
-                              text_color=WHITE, font=ctk.CTkFont(family="Consolas", size=11),
-                              wrap="word", state="normal")
-        box.pack(fill="both", expand=True, padx=16, pady=(0, 10))
-        box.insert("end", notes if notes else "No release notes provided.")
-        box.configure(state="disabled")
+        scroll = ctk.CTkScrollableFrame(win, fg_color=PANEL, corner_radius=8)
+        scroll.pack(fill="both", expand=True, padx=16, pady=(0, 10))
 
-        btns = ctk.CTkFrame(win, fg_color="transparent")
-        btns.pack(pady=(0, 14))
-        ctk.CTkButton(btns, text="⬇  Download Update", fg_color=GREEN, text_color="#061006",
-                       hover_color=GREEN2, width=160,
-                       command=lambda: [__import__("webbrowser").open(url), _upd_close()]).pack(side="left", padx=(0, 10))
-        ctk.CTkButton(btns, text="Later", fg_color=CARD2, text_color=WHITE,
-                       hover_color=("#b0b0b0", "#2a2a2a"), width=80,
-                       command=_upd_close).pack(side="left")
+        for name, cur_v, new_v, url, notes in updates:
+            card = ctk.CTkFrame(scroll, fg_color=CARD, corner_radius=6)
+            card.pack(fill="x", pady=6, padx=4)
+
+            top_row = ctk.CTkFrame(card, fg_color="transparent")
+            top_row.pack(fill="x", padx=10, pady=(8, 4))
+            ctk.CTkLabel(top_row, text=f"📦 {name}", font=ctk.CTkFont(size=14, weight="bold"),
+                         text_color=WHITE).pack(side="left")
+            ctk.CTkLabel(top_row, text="⚠ Out of date", font=ctk.CTkFont(size=11, weight="bold"),
+                         text_color=YELLOW).pack(side="right")
+
+            v_row = ctk.CTkFrame(card, fg_color="transparent")
+            v_row.pack(fill="x", padx=10, pady=(0, 4))
+            ctk.CTkLabel(v_row, text=f"Bundled: v{cur_v}  ->  Latest on GitHub: v{new_v}",
+                         text_color=MUTED, font=ctk.CTkFont(family="Consolas", size=12)).pack(side="left")
+
+            if notes:
+                tb = ctk.CTkTextbox(card, height=70, fg_color=PANEL, text_color=WHITE,
+                                    font=ctk.CTkFont(size=10), wrap="word")
+                tb.pack(fill="x", padx=10, pady=(2, 6))
+                tb.insert("end", notes[:400] + ("..." if len(notes) > 400 else ""))
+                tb.configure(state="disabled")
+
+            btn_row = ctk.CTkFrame(card, fg_color="transparent")
+            btn_row.pack(fill="x", padx=10, pady=(2, 8))
+            ctk.CTkButton(btn_row, text=f"⬇ Open {name} Release", width=180, fg_color=GREEN,
+                          hover_color=GREEN2, text_color="#061006", font=ctk.CTkFont(size=11, weight="bold"),
+                          command=lambda u=url: open_path(u)).pack(side="left")
+
+        ctk.CTkButton(win, text="Close", fg_color=CARD2, text_color=WHITE,
+                      hover_color=("#b0b0b0", "#2a2a2a"), width=90,
+                      command=_upd_close).pack(pady=(0, 14))
 
     # ── Drag & drop ───────────────────────────────────────────────────────────
     def _on_drop(self, event):
