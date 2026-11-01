@@ -499,6 +499,9 @@ def main() -> None:
         elif not ffpfs_path.is_dir() and not ffpfs_path.suffix:
             ffpfs_path.mkdir(parents=True, exist_ok=True)
 
+        success_count = 0
+        failed_items = []
+
         for item in game_items:
             title_id = get_title_id(item)
             out_stem = get_game_name(item) if args.naming_format == "game_name" else title_id
@@ -519,7 +522,13 @@ def main() -> None:
                         current_ffpfs_path.unlink()
                     except Exception as e:
                         print(f"[ERROR] Failed to remove existing output file: {e}")
-                        sys.exit(1)
+                        if not args.batch:
+                            sys.exit(1)
+                        failed_items.append((item.name, f"Failed to remove existing file: {e}"))
+                        continue
+                elif args.batch:
+                    print(f"[WARN] Output file already exists: {current_ffpfs_path.name}. Skipping batch item (use -f/--overwrite to replace).")
+                    continue
                 else:
                     print(f"[WARN] Output file already exists: {current_ffpfs_path}")
                     try:
@@ -540,30 +549,47 @@ def main() -> None:
                         print(f"[ERROR] Failed to remove existing output file: {e}")
                         sys.exit(1)
 
-            if item.is_file() and item.suffix.lower() in ('.exfat', '.ffpkg'):
-                # Direct disk image (.exfat / .ffpkg) -> .ffpfsc (single-file streaming path)
-                compress_file_to_ffpfsc(
-                    item, current_ffpfs_path, mkpfs_cmd_base, mkpfs_cwd,
-                    temp_folder=user_temp,
-                    **pack_kwargs,
-                )
-            elif args.output_format == "exfat":
-                # Raw exFAT image creation from game folder
-                pack_folder_to_exfat(
-                    item, current_ffpfs_path, mkpfs_cmd_base, mkpfs_cwd,
-                    verbose=args.verbose,
-                )
-            else:
-                # Game folder: single-pass exFAT -> .ffpfsc (mkpfs 0.0.9+)
-                # --keep-pfs is silently ignored for folder sources (no intermediate file)
-                pack_folder_single_pass(
-                    item, current_ffpfs_path, mkpfs_cmd_base, mkpfs_cwd,
-                    verify_enabled=args.verify,
-                    temp_folder=user_temp,
-                    **pack_kwargs,
-                )
+            try:
+                if item.is_file() and item.suffix.lower() in ('.exfat', '.ffpkg'):
+                    # Direct disk image (.exfat / .ffpkg) -> .ffpfsc (single-file streaming path)
+                    compress_file_to_ffpfsc(
+                        item, current_ffpfs_path, mkpfs_cmd_base, mkpfs_cwd,
+                        temp_folder=user_temp,
+                        **pack_kwargs,
+                    )
+                elif args.output_format == "exfat":
+                    # Raw exFAT image creation from game folder
+                    pack_folder_to_exfat(
+                        item, current_ffpfs_path, mkpfs_cmd_base, mkpfs_cwd,
+                        verbose=args.verbose,
+                    )
+                else:
+                    # Game folder: single-pass exFAT -> .ffpfsc (mkpfs 0.0.9+)
+                    # --keep-pfs is silently ignored for folder sources (no intermediate file)
+                    pack_folder_single_pass(
+                        item, current_ffpfs_path, mkpfs_cmd_base, mkpfs_cwd,
+                        verify_enabled=args.verify,
+                        temp_folder=user_temp,
+                        **pack_kwargs,
+                    )
+                success_count += 1
+            except Exception as e:
+                print(f"[ERROR] Failed processing {item.name}: {e}")
+                failed_items.append((item.name, str(e)))
+                if not args.batch:
+                    sys.exit(1)
 
-    print("\n[SUCCESS] All operations completed successfully!")
+        if args.batch:
+            print(f"\n[SUMMARY] Batch finished: {success_count} succeeded, {len(failed_items)} failed out of {len(game_items)} item(s).")
+            if failed_items:
+                print("[SUMMARY] Failed items:")
+                for name, err in failed_items:
+                    print(f"  • {name}: {err}")
+                sys.exit(1)
+            else:
+                print("[SUCCESS] All batch operations completed successfully!")
+        else:
+            print("\n[SUCCESS] Operation completed successfully!")
 
 
 if __name__ == "__main__":
