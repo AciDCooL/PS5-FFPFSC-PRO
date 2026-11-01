@@ -15,6 +15,16 @@ from pathlib import Path
 from tkinter import filedialog, messagebox
 import tkinter as tk
 
+# Force UTF-8 stdio to avoid cp1252 / cp1250 UnicodeEncodeError on Windows
+for _stream in (sys.stdout, sys.stderr):
+    if _stream and hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+os.environ.setdefault("PYTHONUTF8", "1")
+
 try:
     import customtkinter as ctk
 except ImportError:
@@ -1363,6 +1373,7 @@ class ArchiveExtractor:
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     text=True,
+                    errors="replace",
                     bufsize=1,
                     universal_newlines=True,
                     creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
@@ -1620,6 +1631,8 @@ class CLIWorker(threading.Thread):
         try:
             env = os.environ.copy()
             env["PYTHONUNBUFFERED"] = "1"
+            env["PYTHONIOENCODING"] = "utf-8"
+            env["PYTHONUTF8"] = "1"
             self.temp_dir.mkdir(parents=True, exist_ok=True)
             env["TEMP"] = str(self.temp_dir)
             env["TMP"] = str(self.temp_dir)
@@ -1632,6 +1645,8 @@ class CLIWorker(threading.Thread):
                 stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 bufsize=1,
                 universal_newlines=True,
                 env=env,

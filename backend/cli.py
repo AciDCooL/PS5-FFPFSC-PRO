@@ -4,6 +4,18 @@ from __future__ import annotations  # makes str|None / list[X] work on Python 3.
 import sys
 import os
 
+# ── Force UTF-8 stdio ─────────────────────────────────────────────────────────
+# On Windows, piped stdout uses the locale codepage (e.g. cp1250/cp1252), which cannot
+# encode characters like '→' and crashes the backend with UnicodeEncodeError.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+# Propagate to child Python processes (mkpfs subprocesses).
+os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+os.environ.setdefault("PYTHONUTF8", "1")
+
 # ── Bundled mkpfs detection ───────────────────────────────────────────────────
 # When this script lives inside a 'backend/' folder, look for 'backend/mkpfs/'
 # and add 'backend/' to sys.path so 'import mkpfs' resolves to the bundled copy.
@@ -212,7 +224,7 @@ def pack_folder_single_pass(
     verbose: bool = False,
     temp_folder: Path | None = None,
 ) -> None:
-    print(f"[INFO] Packing {game_folder.name} → {ffpfsc_path.name} (single-pass exFAT+zstd)...")
+    print(f"[INFO] Packing {game_folder.name} -> {ffpfsc_path.name} (single-pass exFAT+zstd)...")
     cmd = mkpfs_cmd_base + [
         "pack", "folder",
         "--version", "PS5",
@@ -475,7 +487,7 @@ def main() -> None:
                     **pack_kwargs,
                 )
             else:
-                # Game folder: single-pass exFAT → .ffpfsc (mkpfs 0.0.9+)
+                # Game folder: single-pass exFAT -> .ffpfsc (mkpfs 0.0.9+)
                 # --keep-pfs is silently ignored for folder sources (no intermediate file)
                 pack_folder_single_pass(
                     item, current_ffpfs_path, mkpfs_cmd_base, mkpfs_cwd,
