@@ -27,6 +27,9 @@ a = Analysis(
         'cryptography.hazmat.backends.openssl',
         'cryptography.hazmat.backends.openssl.backend',
         'cryptography.hazmat.bindings._rust',
+        # zlib-ng optional fast compression
+        'zlib_ng',
+        'zlib_ng.zlib_ng',
         # Note: pycparser.lextab / pycparser.yacctab warnings are harmless —
         # those are PLY-generated files that pycparser creates lazily at runtime.
     ],
