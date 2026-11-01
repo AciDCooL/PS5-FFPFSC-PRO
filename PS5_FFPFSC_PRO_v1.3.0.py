@@ -1095,6 +1095,7 @@ class SettingsWindow(ctk.CTkToplevel):
             ("Keep intermediate PFS image",           self.app.keep_pfs_var,        None),
             ("Verify output (slower, uses more RAM)", self.app.verify_output_var,    None),
             ("Auto-clear temp folder after success",  self.app.auto_clear_temp_var,  "auto_clear_temp"),
+            ("Disable APR/AMPR question",             self.app.disable_ampr_prompt_var, "disable_ampr_prompt"),
             ("Per-game output subfolder (output/GameName/)", self.app.per_game_folder_var, "per_game_folder"),
             ("Verbose mkpfs output (debug)",          self.app.verbose_var,           None),
         ]:
@@ -2226,6 +2227,7 @@ class App:
         self._saved_ampr_folder     = settings.get("ampr_folder", "")
         self._saved_per_game_folder = settings.get("per_game_folder", False)
         self._saved_auto_clear_temp = settings.get("auto_clear_temp", False)
+        self._saved_disable_ampr_prompt = settings.get("disable_ampr_prompt", False)
         self._saved_compression_level = settings.get("compression_level", 9)
         self._saved_cpu_count = settings.get("cpu_count", 0)
         self._saved_block_size = settings.get("block_size", "auto")
@@ -2309,6 +2311,7 @@ class App:
         self.verify_output_var = tk.BooleanVar(value=False)
         self.auto_clear_temp_var  = tk.BooleanVar(value=self._saved_auto_clear_temp)
         self.per_game_folder_var  = tk.BooleanVar(value=self._saved_per_game_folder)
+        self.disable_ampr_prompt_var = tk.BooleanVar(value=self._saved_disable_ampr_prompt)
         # MkPFS 0.0.8 tuning
         self.compression_level_var = tk.IntVar(value=self._saved_compression_level)
         self.cpu_count_var         = tk.IntVar(value=self._saved_cpu_count)
@@ -2467,18 +2470,22 @@ class App:
                       text_color=WHITE).grid(row=9, column=0, sticky="w", padx=14, pady=(10, 6))
         opts = ctk.CTkFrame(left, fg_color=PANEL)
         opts.grid(row=10, column=0, sticky="ew", padx=14, pady=(0, 10))
-        for textv, var in [
-            ("Open output folder when done",       self.open_output_var),
-            ("Show summary popup",                 self.summary_popup_var),
-            ("Play sound on completion",           self.sound_complete_var),
-            ("Play sound on errors",               self.sound_error_var),
-            ("Keep intermediate PFS",              self.keep_pfs_var),
-            ("Verify Output (Slower, Uses More RAM)", self.verify_output_var),
-            ("Auto-clear temp after success",      self.auto_clear_temp_var),
-            ("Verbose mkpfs output (debug)",       self.verbose_var),
+        for textv, var, key in [
+            ("Open output folder when done",       self.open_output_var,      None),
+            ("Show summary popup",                 self.summary_popup_var,    None),
+            ("Play sound on completion",           self.sound_complete_var,   None),
+            ("Play sound on errors",               self.sound_error_var,      None),
+            ("Disable APR/AMPR question",          self.disable_ampr_prompt_var, "disable_ampr_prompt"),
+            ("Keep intermediate PFS",              self.keep_pfs_var,         None),
+            ("Verify Output (Slower, Uses More RAM)", self.verify_output_var, None),
+            ("Auto-clear temp after success",      self.auto_clear_temp_var,  "auto_clear_temp"),
+            ("Verbose mkpfs output (debug)",       self.verbose_var,          None),
         ]:
-            ctk.CTkCheckBox(opts, text=textv, variable=var, fg_color=GREEN, hover_color=GREEN2,
-                             text_color=WHITE).pack(anchor="w", pady=2)
+            cb = ctk.CTkCheckBox(opts, text=textv, variable=var, fg_color=GREEN, hover_color=GREEN2,
+                                 text_color=WHITE)
+            if key:
+                cb.configure(command=lambda k=key, v=var: save_settings({k: v.get()}))
+            cb.pack(anchor="w", pady=2)
 
         ctk.CTkLabel(opts,
                       text="  FOLDER button detects single games and multi-dump parent folders.",
@@ -4390,7 +4397,7 @@ v1.0
         if item.path and item.path.is_dir():
             if not getattr(item, "ampr_emu", False) and not getattr(item, "_ampr_asked", False):
                 item._ampr_asked = True
-                if self._ask_is_apr(item):
+                if not self.disable_ampr_prompt_var.get() and self._ask_is_apr(item):
                     item.ampr_emu = True
             if getattr(item, "ampr_emu", False):
                 self._ensure_ampr_folder()
@@ -4545,14 +4552,26 @@ v1.0
                      font=ctk.CTkFont(size=12), text_color=MUTED,
                      justify="left").pack(padx=28, pady=(0, 18))
 
+        dont_ask_var = tk.BooleanVar(value=False)
+        ctk.CTkCheckBox(win, text="Don't ask again (remember in Options)",
+                        variable=dont_ask_var,
+                        fg_color=GREEN, hover_color=GREEN2,
+                        text_color=MUTED).pack(pady=(0, 14))
+
         btn_row = ctk.CTkFrame(win, fg_color="transparent")
         btn_row.pack(pady=(0, 22))
 
         def _yes():
             result[0] = True
+            if dont_ask_var.get():
+                self.disable_ampr_prompt_var.set(True)
+                save_settings({"disable_ampr_prompt": True})
             win.destroy()
 
         def _no():
+            if dont_ask_var.get():
+                self.disable_ampr_prompt_var.set(True)
+                save_settings({"disable_ampr_prompt": True})
             win.destroy()
 
         self._button(btn_row, "Yes — it's APR", _yes, green=True,
@@ -4695,7 +4714,7 @@ v1.0
         if item.path and item.path.is_dir():
             if not getattr(item, "ampr_emu", False) and not getattr(item, "_ampr_asked", False):
                 item._ampr_asked = True
-                if self._ask_is_apr(item):
+                if not self.disable_ampr_prompt_var.get() and self._ask_is_apr(item):
                     item.ampr_emu = True
             if getattr(item, "ampr_emu", False):
                 self._ensure_ampr_folder()
