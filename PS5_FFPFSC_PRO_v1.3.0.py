@@ -1603,6 +1603,11 @@ class PasswordManagerDialog(ctk.CTkToplevel):
 
 # ─── Archive Extractor ─────────────────────────────────────────────────────────
 
+class ExtractionCancelledError(Exception):
+    """Raised when archive extraction is aborted by the user."""
+    pass
+
+
 class ArchiveExtractor:
     """Extract ZIP / RAR / 7z to a temp subfolder and return the game root Path.
 
@@ -1616,7 +1621,8 @@ class ArchiveExtractor:
 
     @staticmethod
     def extract(archive: Path, dest_root: Path, log_fn=None, progress_fn=None,
-                password: str = "", candidate_passwords: list[str] | None = None) -> Path:
+                password: str = "", candidate_passwords: list[str] | None = None,
+                cancel_check=None, proc_callback=None) -> Path:
         """Extract *archive* under *dest_root/<stem>* and return the extracted root.
         progress_fn(pct, filename) is called periodically.
         Tries *password* first, then retries through *candidate_passwords* in priority order."""
@@ -1639,6 +1645,11 @@ class ArchiveExtractor:
         last_err: Exception | None = None
 
         for idx, pwd in enumerate(candidates):
+            if cancel_check and cancel_check():
+                if dest.exists():
+                    shutil.rmtree(dest, ignore_errors=True)
+                raise ExtractionCancelledError("Extraction cancelled by user.")
+
             masked = (pwd[:2] + "*" * (len(pwd) - 2)) if len(pwd) > 2 else ("*" * len(pwd) if pwd else "(none)")
             if log_fn:
                 if total_cands > 1:
@@ -1653,13 +1664,18 @@ class ArchiveExtractor:
 
             try:
                 if suffix == ".zip":
-                    ArchiveExtractor._zip(archive, dest, log_fn, progress_fn, pwd)
+                    ArchiveExtractor._zip(archive, dest, log_fn, progress_fn, pwd, cancel_check=cancel_check)
                 elif suffix == ".rar":
-                    ArchiveExtractor._rar(archive, dest, log_fn, progress_fn, pwd)
+                    ArchiveExtractor._rar(archive, dest, log_fn, progress_fn, pwd, cancel_check=cancel_check, proc_callback=proc_callback)
                 elif suffix == ".7z":
-                    ArchiveExtractor._sevenz(archive, dest, log_fn, progress_fn, pwd)
+                    ArchiveExtractor._sevenz(archive, dest, log_fn, progress_fn, pwd, cancel_check=cancel_check, proc_callback=proc_callback)
                 else:
                     raise ValueError(f"Unsupported archive format: {archive.suffix}")
+
+                if cancel_check and cancel_check():
+                    if dest.exists():
+                        shutil.rmtree(dest, ignore_errors=True)
+                    raise ExtractionCancelledError("Extraction cancelled by user.")
 
                 game_root = ArchiveExtractor._find_root(dest)
                 if log_fn:
@@ -1668,6 +1684,10 @@ class ArchiveExtractor:
                     else:
                         log_fn("OK", f"Extracted to: {game_root}")
                 return game_root
+            except ExtractionCancelledError:
+                if dest.exists():
+                    shutil.rmtree(dest, ignore_errors=True)
+                raise
             except Exception as exc:
                 last_err = exc
                 if idx + 1 < total_cands and log_fn:
@@ -1678,12 +1698,14 @@ class ArchiveExtractor:
     # ── format handlers ────────────────────────────────────────────────────────
 
     @staticmethod
-    def _zip(archive: Path, dest: Path, log_fn, progress_fn=None, password: str = ""):
+    def _zip(archive: Path, dest: Path, log_fn, progress_fn=None, password: str = "", cancel_check=None):
         pwd_bytes = password.encode() if password else None
         with zipfile.ZipFile(archive, "r") as zf:
             names = zf.namelist()
             total = len(names)
             for i, name in enumerate(names):
+                if cancel_check and cancel_check():
+                    raise ExtractionCancelledError("Extraction cancelled by user.")
                 zf.extract(name, dest, pwd=pwd_bytes)
                 pct = int((i + 1) / total * 100) if total else 0
                 if progress_fn:
@@ -1730,19 +1752,29 @@ class ArchiveExtractor:
         return None
 
     @staticmethod
-    def _rar(archive: Path, dest: Path, log_fn, progress_fn=None, password: str = ""):
+    def _rar(archive: Path, dest: Path, log_fn, progress_fn=None, password: str = "", cancel_check=None, proc_callback=None):
         # ── Try rarfile Python library first ──────────────────────────────────
         try:
             import rarfile  # type: ignore
             with rarfile.RarFile(str(archive)) as rf:
                 if password:
-                    rf.setpassword(password.encode())
-                rf.extractall(str(dest))
+                    rf.setpassword(password.encode() if isinstance(password, str) else password)
+                members = rf.infolist()
+                total = len(members)
+                for i, m in enumerate(members):
+                    if cancel_check and cancel_check():
+                        raise ExtractionCancelledError("Extraction cancelled by user.")
+                    rf.extract(m, str(dest))
+                    pct = int((i + 1) / total * 100) if total else 0
+                    if progress_fn:
+                        progress_fn(pct, m.filename)
             if log_fn:
                 log_fn("OK", "RAR extracted via rarfile library")
             return
         except ImportError:
             pass
+        except ExtractionCancelledError:
+            raise
         except Exception as e:
             if log_fn:
                 log_fn("WARN", f"rarfile failed ({e}) — trying CLI tools…")
@@ -1766,6 +1798,7 @@ class ArchiveExtractor:
             if log_fn:
                 log_fn("INFO", f"Running: {Path(tool).name}  (this may take a while for large archives…)")
 
+            proc = None
             try:
                 proc = subprocess.Popen(
                     cmd,
@@ -1777,8 +1810,19 @@ class ArchiveExtractor:
                     universal_newlines=True,
                     creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
                 )
+                if proc_callback:
+                    proc_callback(proc)
+
                 last_log_t = time.time()
                 for line in proc.stdout or []:
+                    if cancel_check and cancel_check():
+                        proc.terminate()
+                        try:
+                            proc.wait(timeout=2.0)
+                        except subprocess.TimeoutExpired:
+                            proc.kill()
+                        raise ExtractionCancelledError("Extraction cancelled by user.")
+
                     line = line.rstrip()
                     if not line:
                         continue
@@ -1791,15 +1835,27 @@ class ArchiveExtractor:
                         if m:
                             progress_fn(int(m.group(1)), line)
                 code = proc.wait()
+                if cancel_check and cancel_check():
+                    raise ExtractionCancelledError("Extraction cancelled by user.")
                 if code != 0:
                     raise RuntimeError(f"{Path(tool).name} exited with code {code} — extraction failed.")
                 if log_fn:
                     log_fn("OK", f"RAR extracted via {Path(tool).name}")
                 return
+            except ExtractionCancelledError:
+                raise
             except RuntimeError:
                 raise
             except Exception as e:
                 raise RuntimeError(f"Extraction error ({Path(tool).name}): {e}")
+            finally:
+                if proc and proc.poll() is None and cancel_check and cancel_check():
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+                if proc_callback:
+                    proc_callback(None)
 
         # ── Nothing worked — helpful error ─────────────────────────────────────
         _script_dir = Path(getattr(sys, "frozen", None) and sys.executable or __file__).parent
@@ -1814,28 +1870,72 @@ class ArchiveExtractor:
         )
 
     @staticmethod
-    def _sevenz(archive: Path, dest: Path, log_fn, progress_fn=None, password: str = ""):
+    def _sevenz(archive: Path, dest: Path, log_fn, progress_fn=None, password: str = "", cancel_check=None, proc_callback=None):
         try:
             import py7zr  # type: ignore
             kwargs = {}
             if password:
                 kwargs["password"] = password
             with py7zr.SevenZipFile(str(archive), mode="r", **kwargs) as sz:
+                if cancel_check and cancel_check():
+                    raise ExtractionCancelledError("Extraction cancelled by user.")
                 sz.extractall(str(dest))
+                if cancel_check and cancel_check():
+                    raise ExtractionCancelledError("Extraction cancelled by user.")
             return
         except ImportError:
             pass
-        # Fallback: 7z / 7za CLI
+        except ExtractionCancelledError:
+            raise
+
+        # Fallback: 7z / 7za CLI with process cancellation
         for exe in ("7z", "7za"):
+            proc = None
             try:
-                cmd = [exe, "x", str(archive), f"-o{dest}", "-y"]
+                cmd = [exe, "x", str(archive), f"-o{dest}", "-y", "-bsp1", "-bso0"]
                 if password:
                     cmd.append(f"-p{password}")
-                subprocess.run(cmd, check=True,
-                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                return
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    errors="replace",
+                    bufsize=1,
+                    universal_newlines=True,
+                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+                )
+                if proc_callback:
+                    proc_callback(proc)
+                for line in proc.stdout or []:
+                    if cancel_check and cancel_check():
+                        proc.terminate()
+                        try:
+                            proc.wait(timeout=2.0)
+                        except subprocess.TimeoutExpired:
+                            proc.kill()
+                        raise ExtractionCancelledError("Extraction cancelled by user.")
+                    line = line.rstrip()
+                    if progress_fn:
+                        m = re.search(r"(\d+)%", line)
+                        if m:
+                            progress_fn(int(m.group(1)), line)
+                code = proc.wait()
+                if cancel_check and cancel_check():
+                    raise ExtractionCancelledError("Extraction cancelled by user.")
+                if code == 0:
+                    return
             except (FileNotFoundError, subprocess.CalledProcessError):
                 pass
+            finally:
+                if proc and proc.poll() is None and cancel_check and cancel_check():
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+                if proc_callback:
+                    proc_callback(None)
+
         raise RuntimeError(
             "Cannot extract 7z — install py7zr:  pip install py7zr\n"
             "or put 7z.exe on your PATH."
@@ -2642,6 +2742,9 @@ class App:
         self._queue_start_time: float = 0.0
         self._queue_initial_bytes: int = 0
         self._last_speed_bps: float = 0.0
+        self._active_extract_proc: subprocess.Popen | None = None
+        self._active_extract_dest: Path | None = None
+        self._is_extracting: bool = False
 
     def _show_first_run_wizard(self):
         wiz = FirstRunWizard(self.root)
@@ -4592,6 +4695,9 @@ v1.0
             temp_base = str(archive.parent / "_ffpfsc_temp")
             self.temp_var.set(temp_base)
         extract_root = Path(temp_base) / "_extracted"
+        self._active_extract_dest = extract_root / archive.stem
+        self._is_extracting = True
+        self.cancel_requested = False
 
         item.status = "Extracting"
         self.update_queue_box()
@@ -4617,14 +4723,25 @@ v1.0
         pwd = self.password_var.get().strip()
         candidates = list(self.archive_passwords)
 
+        def _proc_cb(proc):
+            self._active_extract_proc = proc
+
+        def _cancel_chk():
+            return self.cancel_requested
+
         def worker():
             try:
                 extracted_root = ArchiveExtractor.extract(
                     archive, extract_root,
                     log_fn=self.log, progress_fn=_progress,
                     password=pwd,
-                    candidate_passwords=candidates
+                    candidate_passwords=candidates,
+                    cancel_check=_cancel_chk,
+                    proc_callback=_proc_cb,
                 )
+                if self.cancel_requested:
+                    raise ExtractionCancelledError("Cancelled by user.")
+
                 games = find_game_folders(extracted_root)
                 game_path = games[0] if games else extracted_root
 
@@ -4638,9 +4755,19 @@ v1.0
                 item.artwork      = find_artwork(game_path)
                 item.status       = "Queued"
                 self._extract_q.put(("ok", item))
+            except ExtractionCancelledError:
+                self.log("WARN", f"Extraction cancelled for {archive.name}.")
+                self._extract_q.put(("cancelled", item))
             except Exception as exc:
-                self.log("ERROR", f"Extraction failed: {exc}")
-                self._extract_q.put(("error", str(exc)))
+                if self.cancel_requested:
+                    self.log("WARN", f"Extraction cancelled for {archive.name}.")
+                    self._extract_q.put(("cancelled", item))
+                else:
+                    self.log("ERROR", f"Extraction failed: {exc}")
+                    self._extract_q.put(("error", str(exc)))
+            finally:
+                self._is_extracting = False
+                self._active_extract_proc = None
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -5470,6 +5597,19 @@ v1.0
         self.overall_eta_var.set("")
         self.stats_queue_eta_var.set("Queue ETA: —")
         self.status_update("Cancelling", "Cancel requested.", "Cancelling", 0, 0, "—", "—", "—")
+
+        # 1. Terminate active archive extraction process immediately if running
+        proc = getattr(self, "_active_extract_proc", None)
+        if proc and proc.poll() is None:
+            try:
+                self.log("WARN", "Terminating active archive extraction process...")
+                proc.terminate()
+            except Exception as e:
+                self.log("WARN", f"Failed to terminate extract process: {e}")
+
+        # 2. Terminate CLIWorker if running
+        if getattr(self, "worker", None):
+            self.worker._terminate()
 
     def status_update(self, title, detail, stage, stage_pct, overall_pct, elapsed, speed, eta):
         if stage == "Building Image" and stage_pct >= 100:
@@ -6621,7 +6761,26 @@ v1.0
         # ── Archive extraction completion ─────────────────────────────────────
         try:
             status, payload = self._extract_q.get_nowait()
-            if status == "ok":
+            if status == "cancelled":
+                cancelled_item = payload
+                if cancelled_item:
+                    cancelled_item.status = "Cancelled"
+                self._batch_running = False
+                self.cancel_requested = False
+                self.start_btn.configure(state="normal")
+                self.cancel_btn.configure(state="disabled")
+                self._queue_start_time = 0.0
+                self._last_speed_bps = 0.0
+                self.queue_eta_var.set("")
+                self.overall_eta_var.set("")
+                self.stats_queue_eta_var.set("Queue ETA: —")
+                self.update_queue_box()
+                self._update_batch_counter()
+                self.status_update("Ready", "Extraction cancelled by user.", "Ready", 0, 0, "00:00", "—", "—")
+                self.log("WARN", "Archive extraction aborted and temporary files cleaned up.")
+                if getattr(self, "_active_extract_dest", None) and self._active_extract_dest.exists():
+                    shutil.rmtree(self._active_extract_dest, ignore_errors=True)
+            elif status == "ok":
                 item = payload
                 # Item was updated in-place — clear cache so details panel refreshes fully
                 self._details_item   = None
