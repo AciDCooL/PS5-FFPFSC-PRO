@@ -130,7 +130,8 @@ When refactoring large GUI codebases, beware of these subtle Python runtime erro
 
 ---
 
-## 7. Component Updating & Plugin Standard
+## 7. Component Architecture & MkPFS Standard
 
-- **MkPFS Plugin Independence**: `mkpfs` is decoupled from the main app code and resolved via `_locate_mkpfs()` in `backend/cli.py`.
+- **Static MkPFS Integration (v1.1.0+)**: `mkpfs` is integrated statically into `backend/mkpfs/` with dependencies (`zlib-ng>=0.5.1`, `isal>=1.0.0`, `cryptography>=47.0.0`) pinned in `requirements.txt`. Do NOT use dynamic runtime plugin loading (`plugins/` folder via `--no-deps`) as compiled C-extensions fail when external wheels are loaded dynamically without native binaries.
+- **Output Preservation**: Always pass `--no-adjust-output-file-extension` when invoking MkPFS `pack folder` or `pack file` so output filenames are never mutated unexpectedly.
 - **Silent Startup Checks**: Never display intrusive popups on startup for component updates. Check GitHub silently in a background thread; if an update exists, update the Settings button badge (`⚙ Settings ●`) and log an informative message.

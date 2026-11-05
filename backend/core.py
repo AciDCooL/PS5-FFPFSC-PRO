@@ -329,43 +329,29 @@ def is_apr_game(path: Path) -> bool:
 # ── Plugin Version Management ─────────────────────────────────────────────────
 
 def detect_mkpfs_version() -> tuple[str, str]:
-    plugin_dirs = [PLUGINS_DIR, APP_DIR / "plugins"]
-    for pdir in plugin_dirs:
-        if (pdir / "mkpfs" / "__main__.py").is_file():
-            cur_pypath = os.environ.get("PYTHONPATH", "")
-            if str(pdir) not in cur_pypath:
-                os.environ["PYTHONPATH"] = f"{pdir}{os.pathsep}{cur_pypath}".rstrip(os.pathsep)
-            try:
-                r = subprocess.run([sys.executable, "-m", "mkpfs", "-V"], cwd=str(pdir), capture_output=True, text=True, timeout=5)
-                m = re.search(r"(\d+(?:\.\d+)+)", (r.stdout or r.stderr).strip())
-                if m:
-                    return m.group(1), "Plugin"
-            except Exception:
-                pass
+    try:
+        backend_dir = Path(__file__).resolve().parent
+        if (backend_dir / "mkpfs" / "__init__.py").is_file():
+            r = subprocess.run([sys.executable, "-m", "mkpfs", "-V"], cwd=str(backend_dir), capture_output=True, text=True, timeout=5)
+            m = re.search(r"(\d+(?:\.\d+)+)", (r.stdout or r.stderr).strip())
+            if m:
+                return m.group(1), "Integrated"
+    except Exception:
+        pass
 
     try:
         r = subprocess.run([sys.executable, "-m", "mkpfs", "-V"], capture_output=True, text=True, timeout=5)
         m = re.search(r"(\d+(?:\.\d+)+)", (r.stdout or r.stderr).strip())
-        if m and tuple(int(x) for x in m.group(1).split(".")) > (0, 0, 9):
-            return m.group(1), "Python Environment"
+        if m:
+            return m.group(1), "System"
     except Exception:
         pass
 
-    return "0.0.9", "Bundled"
+    return "1.1.0", "Integrated"
 
 
 def upgrade_mkpfs_plugin(target_version: str | None = None) -> tuple[bool, str]:
-    PLUGINS_DIR.mkdir(parents=True, exist_ok=True)
-    pkg = f"mkpfs=={target_version}" if target_version else "mkpfs"
-    cmd = [sys.executable, "-m", "pip", "install", "--upgrade", "--target", str(PLUGINS_DIR), "--no-deps", pkg]
-    try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-        if r.returncode == 0:
-            v, src = detect_mkpfs_version()
-            return True, f"Successfully installed MkPFS v{v} into plugins directory."
-        return False, r.stderr.strip() or r.stdout.strip() or "Installation failed."
-    except Exception as e:
-        return False, str(e)
+    return False, "MkPFS is statically integrated (v1.1.0); plugin overrides are disabled."
 
 
 def revert_mkpfs_plugin() -> bool:

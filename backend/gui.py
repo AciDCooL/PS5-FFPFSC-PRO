@@ -601,7 +601,7 @@ class PS5ContainerBuilderApp:
                     if item.is_file() and item.suffix.lower() == '.exfat':
                         # Direct exFAT to ffpfsc
                         success = self.run_command_stream(
-                            mkpfs_cmd_base + ["pack", "file", "--compress", "--version", "PS5", "--inode-bits", "32", str(item), str(current_ffpfs_path)],
+                            mkpfs_cmd_base + ["pack", "file", "--compress", "--no-adjust-output-file-extension", "--version", "PS5", "--inode-bits", "32", str(item), str(current_ffpfs_path)],
                             cwd=mkpfs_cwd
                         )
                     else:
@@ -622,7 +622,7 @@ class PS5ContainerBuilderApp:
                             # 2. Compression to .ffpfsc
                             print(f"[INFO] Compressing nested PFS image to outer container {current_ffpfs_path.name}...")
                             success = self.run_command_stream(
-                                mkpfs_cmd_base + ["pack", "file", "--compress", "--version", "PS5", "--inode-bits", "32", str(temp_pfs), str(current_ffpfs_path)],
+                                mkpfs_cmd_base + ["pack", "file", "--compress", "--no-adjust-output-file-extension", "--version", "PS5", "--inode-bits", "32", str(temp_pfs), str(current_ffpfs_path)],
                                 cwd=mkpfs_cwd
                             )
 

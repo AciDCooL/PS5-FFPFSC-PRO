@@ -34,9 +34,20 @@ a = Analysis(
         'cryptography.hazmat.backends.openssl',
         'cryptography.hazmat.backends.openssl.backend',
         'cryptography.hazmat.bindings._rust',
-        # zlib-ng optional fast compression
+        # zlib-ng optional fast compression & isal acceleration
         'zlib_ng',
         'zlib_ng.zlib_ng',
+        'isal',
+        'isal.isal_zlib',
+        # MkPFS package modules
+        'mkpfs',
+        'mkpfs.cli',
+        'mkpfs.pfs',
+        'mkpfs.compression',
+        'mkpfs.ampr',
+        'mkpfs.exfat',
+        'mkpfs.exfat_writer',
+        'backend.mkpfs',
         # Note: pycparser.lextab / pycparser.yacctab warnings are harmless —
         # those are PLY-generated files that pycparser creates lazily at runtime.
     ],

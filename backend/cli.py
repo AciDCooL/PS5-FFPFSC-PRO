@@ -198,85 +198,21 @@ def _mkpfs_error_hint(exc: subprocess.CalledProcessError, output_path: Path) -> 
 
 
 def _locate_mkpfs() -> tuple[list[str], str | None]:
-    """Return (cmd_base, cwd) for invoking mkpfs, prioritizing upgraded plugins over bundled copy."""
-    candidates = []
-
-    def _probe(cmd: list[str], cwd: str | None = None, label: str = ""):
-        try:
-            r = subprocess.run(cmd + ["-V"], cwd=cwd, capture_output=True, text=True, timeout=5)
-            out = (r.stdout or r.stderr).strip()
-            m = re.search(r"(\d+(?:\.\d+)+)", out)
-            if m:
-                v_str = m.group(1)
-                v_tup = tuple(int(x) for x in v_str.split("."))
-                return v_tup, v_str, cmd, cwd, label
-        except Exception:
-            pass
-        return (0,), "unknown", cmd, cwd, label
-
-    # 1. Plugin directories (project_root/plugins or APPDATA/plugins)
-    plugin_dirs = [
-        Path(_CLI_DIR).parent / "plugins",
-        Path(os.getenv("APPDATA", str(Path.home()))) / "PS5_FFPFSC_PRO_BIZKUT" / "plugins",
-    ]
-    for pdir in plugin_dirs:
-        if (pdir / "mkpfs" / "__main__.py").is_file():
-            cur_pypath = os.environ.get("PYTHONPATH", "")
-            if str(pdir) not in cur_pypath:
-                os.environ["PYTHONPATH"] = f"{pdir}{os.pathsep}{cur_pypath}".rstrip(os.pathsep)
-            res = _probe([sys.executable, "-m", "mkpfs"], cwd=str(pdir), label=f"Plugin (at {pdir})")
-            if res[0] > (0,):
-                candidates.append(res)
-
-    # 2. System PATH
-    if shutil.which("mkpfs"):
-        res = _probe(["mkpfs"], label="System PATH")
-        if res[0] > (0,):
-            candidates.append(res)
-
-    # 3. Environment pip package
-    res = _probe([sys.executable, "-m", "mkpfs"], label="Python environment")
-    if res[0] > (0, 0, 9):
-        candidates.append(res)
-
-    # 4. Sibling workspace directory
-    parent_dir = Path(__file__).resolve().parent.parent
-    try:
-        for sibling in sorted(parent_dir.iterdir()):
-            if sibling.is_dir() and (sibling / "mkpfs" / "__main__.py").is_file():
-                res = _probe([sys.executable, "-m", "mkpfs"], cwd=str(sibling), label=f"Local workspace at {sibling}")
-                if res[0] > (0,):
-                    candidates.append(res)
-    except Exception:
-        pass
-
-    # 5. Bundled package (backend/mkpfs/) - fallback v0.0.9
-    if os.path.isfile(_BUNDLED_MKPFS):
-        candidates.append(((0, 0, 9), "0.0.9", [sys.executable, "-m", "mkpfs"], _CLI_DIR, "Bundled copy (v0.0.9)"))
-
-    # 6. Frozen EXE fallback
-    if getattr(sys, "frozen", False) and not candidates:
+    """Return (cmd_base, cwd) for invoking mkpfs, prioritizing the integrated package."""
+    # 1. Packaged/frozen executable mode
+    if getattr(sys, "frozen", False):
         print("[INFO] Running in packaged/frozen environment. Using internal MkPFS bundle.")
         return [sys.executable, "--mkpfs-internal"], None
 
-    if candidates:
-        # Highest version wins
-        candidates.sort(key=lambda c: c[0], reverse=True)
-        best = candidates[0]
-        print(f"[INFO] Using MkPFS: {best[4]} (v{best[1]})")
-        return best[2], best[3]
+    # 2. Integrated bundled package (backend/mkpfs/) - v1.1.0
+    if os.path.isfile(_BUNDLED_MKPFS):
+        return [sys.executable, "-m", "mkpfs"], _CLI_DIR
 
-    # Auto-install via pip as last resort
-    print("[INFO] MkPFS not found. Installing automatically via pip...")
-    res = subprocess.run(
-        [sys.executable, "-m", "pip", "install", "mkpfs"],
-        capture_output=True, text=True,
-    )
-    if res.returncode != 0:
-        print("[ERROR] Failed to install mkpfs. Please install it manually: pip install mkpfs")
-        print(res.stderr)
-        sys.exit(1)
-    print("[OK] MkPFS installed successfully.")
+    # 3. System PATH fallback
+    if shutil.which("mkpfs"):
+        return ["mkpfs"], None
+
+    # 4. Python environment fallback
     return [sys.executable, "-m", "mkpfs"], None
 
 
@@ -301,6 +237,7 @@ def pack_folder_single_pass(
     print(f"[INFO] Packing {game_folder.name} -> {ffpfsc_path.name} (single-pass exFAT+zstd)...")
     cmd = mkpfs_cmd_base + [
         "pack", "folder",
+        "--no-adjust-output-file-extension",
         "--version", "PS5",
         "--inode-bits", "32",
         "--compression-level", str(compression_level),
@@ -318,6 +255,7 @@ def pack_folder_single_pass(
         cmd.append("--verify")
     else:
         print("[INFO] MkPFS post-build verify is disabled by default to avoid MemoryError on some systems.", flush=True)
+        cmd.append("--skip-verification")
     cmd += [str(game_folder), str(ffpfsc_path)]
     print(f"[INFO] Running: {' '.join(cmd)}", flush=True)
     try:
@@ -368,6 +306,7 @@ def compress_file_to_ffpfsc(
     print(f"[INFO] Compressing {source_file.name} to outer container {ffpfsc_path.name} using MkPFS...")
     cmd = mkpfs_cmd_base + [
         "pack", "file",
+        "--no-adjust-output-file-extension",
         "--compress",
         "--version", "PS5",
         "--inode-bits", "32",

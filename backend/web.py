@@ -532,12 +532,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           <label><input type="checkbox" id="set_offline_mode"> Strict offline mode</label>
         </div>
         <div style="border-top:1px solid var(--border); padding-top:12px;">
-          <div style="font-weight:bold; margin-bottom:6px;">MkPFS Plugin Component</div>
-          <div id="mkpfsStatusText" style="color:var(--text-muted); font-size:12px; margin-bottom:8px;">Checking...</div>
-          <div style="display:flex; gap:8px;">
-            <button class="btn btn-sm btn-green" onclick="upgradeMkPFS()">🔄 Update MkPFS</button>
-            <button class="btn btn-sm" onclick="revertMkPFS()">↩ Revert to Bundled</button>
-          </div>
+          <div style="font-weight:bold; margin-bottom:6px;">MkPFS Engine</div>
+          <div id="mkpfsStatusText" style="color:var(--text-muted); font-size:12px; margin-bottom:4px;">Checking...</div>
         </div>
       </div>
       <div class="modal-footer">
@@ -890,19 +886,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         body: JSON.stringify(payload)
       });
       closeSettingsModal();
-    }
-    async function upgradeMkPFS() {
-      document.getElementById('mkpfsStatusText').innerText = 'Upgrading MkPFS plugin via pip... Please wait.';
-      const res = await fetch('/api/plugins/upgrade', {method: 'POST'});
-      const data = await res.json();
-      alert(data.message);
-      openSettingsModal();
-    }
-    async function revertMkPFS() {
-      const res = await fetch('/api/plugins/revert', {method: 'POST'});
-      const data = await res.json();
-      alert(data.message);
-      openSettingsModal();
     }
 
     // Passwords Manager Modal

@@ -6,6 +6,17 @@
   v1.3.0  (current)
 ────────────────────────────────────────────────────────────────────────
 
+MkPFS 1.1.0 — INTEGRATED STATIC ENGINE UPGRADE
+
+  • Statically integrated MkPFS v1.1.0 engine directly into backend,
+    eliminating fragile plugin directory loading and wheel incompatibilities
+  • Added native hardware compression support with zlib-ng and ISA-L
+    (isal) acceleration in requirements.txt and PyInstaller builds
+  • Enforced --no-adjust-output-file-extension to preserve target filenames
+    and prevent container naming mismatches
+  • Cleaned up UI component version display: MkPFS now reports as
+    Integrated v1.1.0 across desktop UI, WebUI, and CLI
+
 MkPFS 0.0.9 — SINGLE-PASS PIPELINE UPGRADE
 
   • pack folder now streams directly to a final exFAT-wrapped .ffpfsc

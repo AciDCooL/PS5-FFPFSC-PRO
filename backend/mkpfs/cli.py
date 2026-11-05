@@ -9,10 +9,14 @@ import shutil
 import sys
 import tempfile
 import time
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
-from enum import StrEnum
+
+try:
+    from enum import StrEnum  # Python 3.11+
+except ImportError:
+    from backports.strenum import StrEnum  # Python 3.10 and below
 from pathlib import Path
 
 from . import __version__, consts
@@ -84,6 +88,14 @@ _SINGLE_FILE_RENAME_WARNING_TEXT: str = (
     "WARNING: The inner file was renamed to a safer file name to improve compatibility."
 )
 
+_ISAL_BACKEND_WARNING_TEXT: str = (
+    "WARNING: The ISA-L compression backend is faster at compressing, but it has a known bug "
+    "that produces PFSC blocks the PS5 hardware decompressor rejects for some games, "
+    "causing the console to kernel panic shortly after launch.\n"
+    "Only use it if you accept this risk. Prefer zlib-ng or zlib instead.\n"
+    "See: https://github.com/PSBrew/MkPFS/issues/132\n"
+)
+
 
 def _emit_game_folder_compression_warning() -> None:
     """Emit the red warning about compressing direct game-folder images."""
@@ -116,6 +128,12 @@ def _emit_single_file_verify_name_mismatch_warning(*, external_name: str, intern
         f"Comparing {external_name} with {internal_name} as the same file.",
         icon_name="warning",
     )
+
+
+def _emit_isal_backend_warning() -> None:
+    """Emit the red warning when the compression backend resolves to ISA-L."""
+    info("")  # Adds an empty line before the warning.
+    warning(_ISAL_BACKEND_WARNING_TEXT, icon_name="warning")
 
 
 def _resolve_single_file_internal_name(*, source_file: Path, rename_inner_image: bool) -> str:
@@ -790,9 +808,19 @@ def cli_mkpfs_add_create_args(
     parser.add_argument(
         "--compression-level",
         type=int,
-        default=9,
-        help="Zlib compression level (0-9, default: 9)",
+        default=7,
+        help="Zlib compression level (0-9, default: 7)",
     )
+    parser.add_argument(
+        "--compression-backend",
+        choices=("auto", "zlib-ng", "zlib", "isal"),
+        default="auto",
+        help=(
+            "Compression backend to use for PFSC block compression "
+            "(default: auto — zlib-ng > zlib; isal is never auto-selected, see issue #132)"
+        ),
+    )
+
     parser.add_argument(
         "--max-compressed-ratio",
         type=int,
@@ -1275,7 +1303,7 @@ def _run_pack_build(
 @contextmanager
 def _stage_single_file_source_root(
     *, source_file: Path, temp_folder: Path | None = None, staged_file_name: str | None = None
-) -> Iterator[Path]:
+) -> Generator[Path, None, None]:
     """Yield a temporary source root exposing one file, avoiding data copies when possible.
 
     The staged file is created as a hard link when possible, with a symlink
@@ -1475,7 +1503,12 @@ def cli_mkpfs_create_run(args: argparse.Namespace) -> int:
     # Generate the AMPR emulation index into the source tree before packing so it
     # is included in the image (only when an emulation build marker is present).
     if not args.dry_run:
-        ensure_ampr_index(source_path, enabled=bool(getattr(args, "ampr_index", True)))
+        ensure_ampr_index(
+            source_path,
+            enabled=bool(getattr(args, "ampr_index", True)),
+            create_if_missing=bool(getattr(args, "ampr_skip_regen_if_exists", False)),
+            force_regen=bool(getattr(args, "ampr_force_regen", False)),
+        )
 
     # Default: wrap the folder in an exFAT and compress it into the .ffpfsc in one
     # pass, with no temporary .exfat. Use --raw to pack the folder directly as PFS.
@@ -1801,6 +1834,14 @@ def cli_mkpfs_ls_run(args: argparse.Namespace) -> int:
     image: Path = Path(args.image_file).expanduser().resolve()
     ekpfs: bytes = parse_ekpfs_key_hex(getattr(args, "ekpfs_key", None))
     new_crypt: bool = bool(getattr(args, "new_crypt", False))
+
+    if image.is_dir():
+        print_version_header()
+        info("/")
+        for line in render_source_tree(image):
+            info(line)
+        return 0
+
     fmt: ImageFormat = ImageFormat(getattr(args, "format", ImageFormat.AUTO.value))
     detected: ImageFormat = detect_image_format(image=image, hint=fmt)
 
@@ -1828,7 +1869,7 @@ def cli_mkpfs_ls_run(args: argparse.Namespace) -> int:
                     return 0
             finally:
                 fh.close()
-        info("--deep: no inner exFAT found; showing the image tree")
+        info("No wrapped exFAT detected; showing the PFS image tree.")
 
     errors: list[str]
     _warnings: list[str]
@@ -1852,6 +1893,23 @@ def cli_mkpfs_ls_run(args: argparse.Namespace) -> int:
     for line in render_tree(tree, uroot):
         info(line)
     return 0
+
+
+def render_source_tree(root: Path, prefix: str = "") -> list[str]:
+    """Render a local source folder with the same branch markers used for images."""
+    try:
+        children = sorted(root.iterdir(), key=lambda child: (not child.is_dir(), child.name.lower()))
+    except OSError as exc:
+        return [f"[unreadable] {root.name}: {exc}"]
+
+    lines: list[str] = []
+    for index, child in enumerate(children):
+        last = index == len(children) - 1
+        marker = "`-- " if last else "|-- "
+        lines.append(f"{prefix}{marker}{child.name}")
+        if child.is_dir():
+            lines.extend(render_source_tree(child, prefix + ("    " if last else "|   ")))
+    return lines
 
 
 def cli_mkpfs_info_run(args: argparse.Namespace) -> int:
@@ -2025,6 +2083,78 @@ def cli_mkpfs_extract_run(args: argparse.Namespace) -> int:
     return 0
 
 
+def cli_mkpfs_batch_run(args: argparse.Namespace) -> int:
+    """Batch convert multiple items in a source directory into .ffpfsc images."""
+    source_dir: Path = Path(args.source_dir).expanduser().resolve()
+    output_dir: Path = Path(args.output_dir).expanduser().resolve()
+    print_version_header()
+    try:
+        from .batch import (
+            BatchItem,
+            BatchSummary,
+            discover_batch_items,
+            print_batch_pre_stats,
+            print_batch_summary,
+            run_batch,
+        )
+
+        # Resolve --block-size the same way as the pack-folder command so the
+        # user-supplied value is honoured.  Batch does not support auto-fit
+        # (which requires a full tree walk), so only "auto" and a literal
+        # integer are accepted.
+        block_size_arg: str = str(args.block_size).strip().lower() if isinstance(args.block_size, str) else ""
+        if block_size_arg == "auto":
+            block_size: int = 65536
+        else:
+            try:
+                block_size = int(args.block_size)
+            except (TypeError, ValueError) as exc:
+                raise BuildError("--block-size must be an integer value or 'auto' for batch conversion") from exc
+        config: PackBuildConfig = _resolve_pack_build_config(args, block_size=block_size)
+        pack_flags: dict = {
+            "block_size": config.block_size,
+            "pfs_version": config.pfs_version,
+            "case_insensitive": config.case_insensitive,
+            "zlib_level": config.zlib_level,
+            "threshold_gain": config.threshold_gain,
+            "min_file_gain": config.min_file_gain,
+            "min_compress_size": config.min_compress_size,
+            "cpu_count": config.cpu_count,
+            "compress": config.compress,
+            "skip_executable_compression": config.skip_executable_compression,
+            "encrypted": config.encrypted,
+            "new_crypt": config.new_crypt,
+            "ekpfs": config.ekpfs_key,
+            "verbose": bool(getattr(args, "verbose", False)),
+            "dry_run": bool(getattr(args, "dry_run", False)),
+            "verify": bool(getattr(args, "verify", False)),
+        }
+        items: list[BatchItem] = discover_batch_items(source_dir)
+        if not items:
+            info(f"No packable items found in {source_dir}")
+            return 0
+        print_batch_pre_stats(
+            source_dir=source_dir,
+            output_dir=output_dir,
+            items=items,
+            pack_flags=pack_flags,
+        )
+        summary: BatchSummary = run_batch(
+            source_dir=source_dir,
+            output_dir=output_dir,
+            overwrite=bool(getattr(args, "overwrite", False)),
+            pack_flags=pack_flags,
+            items=items,
+        )
+        print_batch_summary(summary)
+        info(f"Total elapsed: {summary.elapsed_seconds:.1f}s")
+        info(f"Output directory: {output_dir}")
+        return 0 if summary.errors == 0 else 1
+    except BuildError as exc:
+        error(str(exc))
+        return 1
+
+
 def cli_mkpfs_main_parsers() -> argparse.ArgumentParser:
     parser = MkPFSArgumentParser(
         prog="mkpfs",
@@ -2054,6 +2184,20 @@ def cli_mkpfs_main_parsers() -> argparse.ArgumentParser:
         default=True,
         help="Do not generate ampr_emu.index even when fakelib/libSceAmpr.sprx is present",
     )
+    folder_parser.add_argument(
+        "--ampr-skip-regen-if-exists",
+        dest="ampr_skip_regen_if_exists",
+        action="store_true",
+        default=False,
+        help="If AMPR generation is enabled, validate and skip regen when a valid index exists",
+    )
+    folder_parser.add_argument(
+        "--ampr-force-regen",
+        dest="ampr_force_regen",
+        action="store_true",
+        default=False,
+        help="Force AMPR index regeneration even when an existing index is present",
+    )
     folder_parser.set_defaults(func=cli_mkpfs_create_run)
 
     exfat_parser = pack_sub.add_parser("exfat", help="Build a raw exFAT image from a source directory")
@@ -2067,7 +2211,7 @@ def cli_mkpfs_main_parsers() -> argparse.ArgumentParser:
     exfat_parser.add_argument(
         "--cluster-size",
         default="auto",
-        help="exFAT cluster size in bytes or 'auto' (32 KiB, or 64 KiB for large-average-file trees)",
+        help="exFAT cluster size in bytes or 'auto' (default: 65536 - SMP/LVD-optimal 64 KiB)",
     )
     exfat_parser.add_argument("--overwrite", action="store_true", help="Overwrite an existing output file")
     exfat_parser.add_argument("--verbose", action="store_true", help="Verbose output")
@@ -2159,8 +2303,8 @@ def cli_mkpfs_main_parsers() -> argparse.ArgumentParser:
     inspect_parser.add_argument("--new-crypt", action="store_true", help="Use alternate newCrypt EKPFS derivation")
     inspect_parser.set_defaults(func=cli_mkpfs_inspect_run)
 
-    ls_parser = sub.add_parser("tree", help="Print image tree representation")
-    ls_parser.add_argument("image_file", help="Path to input image (.ffpfs or .exfat)")
+    ls_parser = sub.add_parser("tree", help="Print source folder or image tree representation")
+    ls_parser.add_argument("image_file", help="Path to input folder or image (.ffpfs, .ffpfsc, or .exfat)")
     ls_parser.add_argument(
         "--deep",
         action="store_true",
@@ -2212,6 +2356,113 @@ def cli_mkpfs_main_parsers() -> argparse.ArgumentParser:
         help="Disable the extraction progress bar on stderr",
     )
     extract_parser.set_defaults(func=cli_mkpfs_extract_run)
+
+    batch_parser = sub.add_parser(
+        "batch",
+        help="Batch convert multiple items in a directory into .ffpfsc images",
+    )
+    batch_parser.epilog = "Examples:\r\n   mkpfs batch ./games/ ./output/\r\n"
+    batch_parser.add_argument("source_dir", help="Directory containing items to convert")
+    batch_parser.add_argument("output_dir", help="Directory where .ffpfsc images are written")
+    batch_parser.add_argument("--verify", action="store_true", help="Run full verification after a successful pack")
+
+    batch_parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Overwrite existing output files (default: skip)",
+    )
+    batch_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report what would be done without writing",
+    )
+
+    # Shared pack flags (mirrors cli_mkpfs_add_create_args minus positionals)
+    comp_grp = batch_parser.add_mutually_exclusive_group()
+    comp_grp.add_argument(
+        "--compress",
+        action="store_true",
+        default=True,
+        help="Enable PFSC block compression (default)",
+    )
+    comp_grp.add_argument("--no-compress", action="store_true", help="Disable PFSC block compression")
+
+    batch_parser.add_argument(
+        "--threshold-gain",
+        type=int,
+        default=0,
+        help="Minimum per-block gain percent to keep PFSC-compressed blocks (default: 0)",
+    )
+    batch_parser.add_argument(
+        "--block-size",
+        default="auto",
+        help="PFS block size in bytes or 'auto' (default: 65536)",
+    )
+    batch_parser.add_argument(
+        "--version",
+        choices=("PS4", "PS5"),
+        default="PS5",
+        help="PFS profile version (default: PS5)",
+    )
+    batch_parser.add_argument(
+        "--inode-bits",
+        type=int,
+        choices=[32, 64],
+        default=32,
+        help="Inode width mode bit (32 or 64, default: 32)",
+    )
+
+    case_grp = batch_parser.add_mutually_exclusive_group()
+    case_grp.add_argument("--case-sensitive", action="store_true", help="Build a case-sensitive image")
+    case_grp.add_argument(
+        "--case-insensitive",
+        action="store_true",
+        help="Set case-insensitive mode bit (default)",
+    )
+
+    batch_parser.add_argument(
+        "--cpu-count",
+        type=int,
+        default=0,
+        help="Number of CPU cores for PFSC compression (0 = auto)",
+    )
+    batch_parser.add_argument(
+        "--compression-level",
+        type=int,
+        default=7,
+        help="Zlib compression level (0-9, default: 7)",
+    )
+    batch_parser.add_argument(
+        "--compression-backend",
+        choices=("auto", "zlib-ng", "zlib", "isal"),
+        default="auto",
+        help="Compression backend (default: auto — zlib-ng > zlib; isal is never auto-selected)",
+    )
+    batch_parser.add_argument(
+        "--max-compressed-ratio",
+        type=int,
+        default=100,
+        help="Maximum PFSC size as percent of raw file (0-100, default: 100)",
+    )
+    batch_parser.add_argument(
+        "--min-compress-size",
+        type=int,
+        default=0,
+        help="Store files smaller than N bytes raw (default: resolved --block-size)",
+    )
+    batch_parser.add_argument(
+        "--skip-executable-compression",
+        action="store_true",
+        default=True,
+        help="Skip compression in executable files",
+    )
+    batch_parser.add_argument("--verbose", action="store_true", help="Verbose per-file decisions")
+    # Encryption flags (match pack command so batch can build encrypted images)
+    batch_parser.add_argument("--encrypted", action="store_true", help="Encrypt filesystem blocks with AES-XTS")
+    batch_parser.add_argument("--ekpfs-key", help="Optional 64-hex EKPFS key for encrypted images")
+    batch_parser.add_argument("--new-crypt", action="store_true", help="Use alternate newCrypt EKPFS derivation")
+
+    batch_parser.set_defaults(func=cli_mkpfs_batch_run)
 
     return parser
 
@@ -2275,6 +2526,20 @@ def cli_mkpfs_main(argv: list[str] | None = None) -> int:
 
     normalized_argv: list[str] | None = normalize_cli_argv_for_pack_compat(argv)
     args = parser.parse_args(normalized_argv)
+
+    # Configure compression backend when supplied by pack subcommands.
+    if hasattr(args, "compression_backend"):
+        # Import locally to avoid top-level circular import with pfs module.
+        from . import compression as comp
+
+        try:
+            comp.set_backend(args.compression_backend)
+        except Exception as exc:
+            error(f"Unable to select compression backend '{getattr(args, 'compression_backend', None)}': {exc}")
+            return 2
+        if comp.get_backend_name() == "isal":
+            _emit_isal_backend_warning()
+
     return int(args.func(args))
 
 
@@ -2296,6 +2561,7 @@ def cli_mkpfs_inspect_run(args: argparse.Namespace) -> int:
     inspection: PFSImageInspection = inspect_pfs_image(
         image=image,
         ekpfs=parse_ekpfs_key_hex(getattr(args, "ekpfs_key", None)),
+        new_crypt=bool(getattr(args, "new_crypt", False)),
     )
 
     if args.format == "json":
@@ -2322,8 +2588,8 @@ def cli_mkpfs_inspect_run(args: argparse.Namespace) -> int:
         info(f"Warnings: {len(inspection.warnings)}")
         info(f"Errors:   {len(inspection.errors)}")
         for warning_text in inspection.warnings:
-            info(warning_text)
+            warning(f"Warning: {warning_text}", icon_name="warning")
         for error_text in inspection.errors:
-            info(error_text)
+            error(f"Error: {error_text}", icon_name="error")
 
     return 1 if inspection.errors else 0

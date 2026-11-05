@@ -94,32 +94,25 @@ PLUGINS_DIR = Path(__file__).resolve().parent / "plugins"
 
 def detect_mkpfs_version() -> tuple[str, str]:
     """Return (version_str, source_label) for the active MkPFS installation."""
-    plugin_dirs = [
-        PLUGINS_DIR,
-        APP_DIR / "plugins",
-    ]
-    for pdir in plugin_dirs:
-        if (pdir / "mkpfs" / "__main__.py").is_file():
-            cur_pypath = os.environ.get("PYTHONPATH", "")
-            if str(pdir) not in cur_pypath:
-                os.environ["PYTHONPATH"] = f"{pdir}{os.pathsep}{cur_pypath}".rstrip(os.pathsep)
-            try:
-                r = subprocess.run([sys.executable, "-m", "mkpfs", "-V"], cwd=str(pdir), capture_output=True, text=True, timeout=5)
-                m = re.search(r"(\d+(?:\.\d+)+)", (r.stdout or r.stderr).strip())
-                if m:
-                    return m.group(1), "Plugin"
-            except Exception:
-                pass
+    try:
+        backend_dir = Path(__file__).resolve().parent / "backend"
+        if (backend_dir / "mkpfs" / "__init__.py").is_file():
+            r = subprocess.run([sys.executable, "-m", "mkpfs", "-V"], cwd=str(backend_dir), capture_output=True, text=True, timeout=5)
+            m = re.search(r"(\d+(?:\.\d+)+)", (r.stdout or r.stderr).strip())
+            if m:
+                return m.group(1), "Integrated"
+    except Exception:
+        pass
 
     try:
         r = subprocess.run([sys.executable, "-m", "mkpfs", "-V"], capture_output=True, text=True, timeout=5)
         m = re.search(r"(\d+(?:\.\d+)+)", (r.stdout or r.stderr).strip())
-        if m and tuple(int(x) for x in m.group(1).split(".")) > (0, 0, 9):
-            return m.group(1), "Python Environment"
+        if m:
+            return m.group(1), "System"
     except Exception:
         pass
 
-    return "0.0.9", "Bundled"
+    return "1.1.0", "Integrated"
 
 
 def get_mkpfs_version() -> str:
@@ -127,36 +120,16 @@ def get_mkpfs_version() -> str:
 
 
 def install_or_upgrade_mkpfs_plugin(target_version: str | None = None, log_fn=None) -> tuple[bool, str]:
-    """Install or upgrade MkPFS as an independent plugin into the plugins/ directory."""
-    plugin_dir = PLUGINS_DIR
-    plugin_dir.mkdir(parents=True, exist_ok=True)
-    pkg = f"mkpfs=={target_version}" if target_version else "mkpfs"
-    cmd = [sys.executable, "-m", "pip", "install", "--target", str(plugin_dir), "--no-deps", "--upgrade", pkg]
-    if log_fn:
-        log_fn("INFO", f"Installing plugin {pkg} into {plugin_dir}...")
-    try:
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-        if res.returncode != 0:
-            err = res.stderr.strip() or res.stdout.strip()
-            return False, f"pip install failed (code {res.returncode}): {err[:200]}"
-        cur_pypath = os.environ.get("PYTHONPATH", "")
-        if str(plugin_dir) not in cur_pypath:
-            os.environ["PYTHONPATH"] = f"{plugin_dir}{os.pathsep}{cur_pypath}".rstrip(os.pathsep)
-        v_str, _ = detect_mkpfs_version()
-        return True, v_str
-    except Exception as exc:
-        return False, str(exc)
+    """Deprecated: MkPFS is integrated statically."""
+    return False, "MkPFS is statically integrated into this version."
 
 
 def revert_mkpfs_plugin() -> bool:
-    """Remove plugin mkpfs to revert to the bundled copy."""
+    """Clean up any leftover plugin directory."""
     plugin_dir = PLUGINS_DIR
-    mkpfs_sub = plugin_dir / "mkpfs"
-    if mkpfs_sub.exists():
+    if plugin_dir.exists():
         import shutil
-        shutil.rmtree(mkpfs_sub, ignore_errors=True)
-        for d in plugin_dir.glob("mkpfs-*.dist-info"):
-            shutil.rmtree(d, ignore_errors=True)
+        shutil.rmtree(plugin_dir, ignore_errors=True)
         return True
     return False
 
@@ -1406,15 +1379,6 @@ class SettingsWindow(ctk.CTkToplevel):
         ctk.CTkButton(_about_btns, text="🔄  Check for Updates", fg_color=CARD2, text_color=WHITE,
                        hover_color=("#b0b0b0", "#2a2a2a"),
                        command=lambda: self.app._check_for_updates(silent=False)).pack(side="left", padx=(0, 8))
-        if active_mkpfs_src == "Plugin":
-            def _revert_and_refresh():
-                if revert_mkpfs_plugin():
-                    self.app.log("OK", "Reverted MkPFS plugin to bundled copy.")
-                    self.destroy()
-                    self.app.open_settings()
-            ctk.CTkButton(_about_btns, text="↩  Revert MkPFS to Bundled", fg_color=CARD2, text_color=WHITE,
-                           hover_color=("#b0b0b0", "#2a2a2a"),
-                           command=_revert_and_refresh).pack(side="left", padx=(0, 8))
         ctk.CTkButton(_about_btns, text="☕  Support on Ko-fi", fg_color=("#e74c3c", "#c0392b"),
                        text_color=WHITE, hover_color=("#c0392b", "#922b21"),
                        command=lambda: open_path("https://ko-fi.com/kingdkak")).pack(side="left")
@@ -2504,14 +2468,14 @@ class CLIWorker(threading.Thread):
         # IMPORTANT: only use very specific phrases here — broad keyword matches on
         # paths (e.g. _ffpfsc_temp, pfs_image.dat) fire too early because those
         # strings appear in the parameter dump before scanning even begins.
-        if "building exfat image from" in lower:
-            # mkpfs 0.0.9 single-pass start message
+        if "building exfat image from" in lower or "wrapping" in lower:
+            # mkpfs single-pass start message
             self._set_stage("Building Image", 0, "Building exFAT image (single-pass)…")
-        elif "image created successfully" in lower:
-            # mkpfs 0.0.9 success message — image write complete
+        elif "image created successfully" in lower or "successfully wrote" in lower:
+            # mkpfs success message — image write complete
             self._set_stage("Building Image", 100, line)
-        elif "running post-pack" in lower or "running post-create check" in lower:
-            # mkpfs 0.0.9 post-build verification step
+        elif "running post-pack" in lower or "running post-create check" in lower or "post-pack verify" in lower:
+            # mkpfs post-build verification step
             self._set_stage("Verifying Output", 0, "Running post-pack verification…")
         elif "build summary" in lower:
             self._set_stage("Building Image", 100, line)
@@ -4289,38 +4253,9 @@ v1.0
             btn_row = ctk.CTkFrame(card, fg_color="transparent")
             btn_row.pack(fill="x", padx=10, pady=(2, 8))
 
-            if name == MKPFS_NAME:
-                action_status = ctk.CTkLabel(card, text="", font=ctk.CTkFont(size=11), text_color=MUTED)
-                action_status.pack(fill="x", padx=10, pady=(0, 2))
-
-                def _upgrade_mkpfs(target_v=new_v, as_lbl=action_status, s_badge=status_badge, vl=v_label):
-                    as_lbl.configure(text=f"⏳ Upgrading MkPFS to v{target_v} via pip into plugins/...", text_color=YELLOW)
-                    def _bg():
-                        ok, res = install_or_upgrade_mkpfs_plugin(target_v, log_fn=self.log)
-                        if ok:
-                            self.root.after(0, lambda: [
-                                as_lbl.configure(text=f"✓ MkPFS upgraded to v{res} (Plugin active)!", text_color=("#1a7a40", "#4ade80")),
-                                s_badge.configure(text="✓ Up to date", text_color=("#1a7a40", "#4ade80")),
-                                vl.configure(text=f"Installed: v{res} [Plugin]  (Latest on GitHub: v{target_v})"),
-                                self.log("OK", f"MkPFS successfully upgraded to v{res} in plugins directory.")
-                            ])
-                        else:
-                            self.root.after(0, lambda: [
-                                as_lbl.configure(text=f"⚠ Upgrade failed: {res[:80]}", text_color=RED),
-                                self.log("ERROR", f"MkPFS plugin upgrade failed: {res}")
-                            ])
-                    threading.Thread(target=_bg, daemon=True).start()
-
-                ctk.CTkButton(btn_row, text=f"⚡ Upgrade MkPFS to v{new_v}", width=190, fg_color=GREEN,
-                              hover_color=GREEN2, text_color="#061006", font=ctk.CTkFont(size=11, weight="bold"),
-                              command=_upgrade_mkpfs).pack(side="left", padx=(0, 8))
-                ctk.CTkButton(btn_row, text="🌐 Release", width=100, fg_color=CARD2, text_color=WHITE,
-                              hover_color=("#b0b0b0", "#2a2a2a"),
-                              command=lambda u=url: open_path(u)).pack(side="left")
-            else:
-                ctk.CTkButton(btn_row, text=f"⬇ Open {name} Release", width=180, fg_color=GREEN,
-                              hover_color=GREEN2, text_color="#061006", font=ctk.CTkFont(size=11, weight="bold"),
-                              command=lambda u=url: open_path(u)).pack(side="left")
+            ctk.CTkButton(btn_row, text=f"⬇ Open {name} Release", width=180, fg_color=GREEN,
+                          hover_color=GREEN2, text_color="#061006", font=ctk.CTkFont(size=11, weight="bold"),
+                          command=lambda u=url: open_path(u)).pack(side="left")
 
         ctk.CTkButton(win, text="Close", fg_color=CARD2, text_color=WHITE,
                       hover_color=("#b0b0b0", "#2a2a2a"), width=90,
