@@ -4,7 +4,7 @@ a = Analysis(
     ['PS5_FFPFSC_PRO_v1.3.0.py'],
     pathex=[],
     binaries=[],
-    datas=[('backend', 'backend')],
+    datas=[('backend', 'backend'), ('tools', 'tools')],
     hiddenimports=[
         # Web & Core backend
         'backend',

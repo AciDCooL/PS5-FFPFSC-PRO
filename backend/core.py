@@ -268,6 +268,35 @@ def estimate_peak_space_needed(source_size: int, same_drive_flag: bool) -> int:
 
 # ── Title & Game Detection ────────────────────────────────────────────────────
 
+def is_game_folder(path: Path) -> bool:
+    """Return True if path looks like a game folder."""
+    if not path.is_dir():
+        return False
+    sce_sys = path / "sce_sys"
+    return (sce_sys / "param.json").exists() or (sce_sys / "param.sfo").exists() or (path / "eboot.bin").is_file()
+
+
+def find_game_folders(root: Path, max_depth: int = 3) -> list[Path]:
+    """Recursively find all game subfolders under root (up to max_depth levels)."""
+    found: list[Path] = []
+
+    def _scan(path: Path, depth: int) -> None:
+        if depth > max_depth:
+            return
+        if is_game_folder(path):
+            found.append(path)
+            return
+        try:
+            for child in sorted(path.iterdir()):
+                if child.is_dir() and not child.name.startswith("."):
+                    _scan(child, depth + 1)
+        except (PermissionError, OSError):
+            pass
+
+    _scan(root, 0)
+    return found
+
+
 def parse_title_id(path: Path) -> str:
     m = TITLE_RE.search(str(path))
     if m:
@@ -278,6 +307,15 @@ def parse_title_id(path: Path) -> str:
             m = TITLE_RE.search(text)
             if m:
                 return m.group(1).upper()
+        for p in path.rglob("param.sfo"):
+            try:
+                from mkpfs.game_metadata import _parse_sfo
+                sfo = _parse_sfo(p.read_bytes())
+                val = sfo.get("TITLE_ID")
+                if val:
+                    return val.strip().upper()
+            except Exception:
+                pass
     except Exception:
         pass
     return "Unknown"
@@ -294,6 +332,17 @@ def guess_game_name(path: Path) -> str:
                      or loc.get("en-US", {}).get("titleName", "")
                      or next((v.get("titleName", "") for v in loc.values()
                               if isinstance(v, dict) and v.get("titleName")), ""))
+            if title:
+                return title.strip()
+        except Exception:
+            pass
+
+    param_sfo = path / "sce_sys" / "param.sfo"
+    if param_sfo.exists():
+        try:
+            from mkpfs.game_metadata import _parse_sfo
+            sfo = _parse_sfo(param_sfo.read_bytes())
+            title = sfo.get("TITLE")
             if title:
                 return title.strip()
         except Exception:
@@ -370,8 +419,181 @@ class ExtractionCancelledError(Exception):
     pass
 
 
+class PkgExtractorNotFoundError(FileNotFoundError):
+    """Raised when no compatible PS4 PKG extraction tool is found."""
+    pass
+
+
+class PkgExtractionError(RuntimeError):
+    """Raised when PKG extraction fails."""
+    pass
+
+
+class PkgExtractor:
+    EXTRACTOR_CANDIDATES = [
+        "orbis-pub-cmd",
+        "ps4-pkg-tool",
+        "shadpkg",
+        "pkg_pfs_tool",
+    ]
+
+    @classmethod
+    def locate_tool(cls) -> tuple[str, str] | None:
+        """Return (tool_path, tool_type) or None if no extractor is available.
+        tool_type is one of: 'orbis-pub-cmd', 'ps4-pkg-tool', 'shadpkg', 'pkg_pfs_tool'.
+        """
+        search_dirs = [
+            Path(__file__).resolve().parent.parent / "tools",
+            Path(__file__).resolve().parent / "tools",
+            APP_DIR / "tools",
+        ]
+
+        exts = [".exe", ""] if sys.platform == "win32" else ["", ".exe"]
+
+        for name in cls.EXTRACTOR_CANDIDATES:
+            for sdir in search_dirs:
+                for ext in exts:
+                    candidate = sdir / f"{name}{ext}"
+                    if candidate.is_file():
+                        return str(candidate), name
+
+            found = shutil.which(name)
+            if found:
+                return found, name
+
+        return None
+
+    @classmethod
+    def extract(cls, pkg_path: Path, dest_root: Path, log_fn=None, progress_fn=None,
+                cancel_check=None, proc_callback=None) -> Path:
+        """Extract a PS4 PKG to dest_root/<title_id_or_stem> and return extracted game directory."""
+        from mkpfs.game_metadata import read_game_metadata, _parse_sfo
+
+        meta = read_game_metadata(pkg_path)
+        title_id = meta.title_id if (meta.title_id and meta.title_id != "—") else pkg_path.stem
+
+        # Check for PS5 PKG (cannot be decrypted on PC)
+        if title_id.startswith(("PPSA", "PUSA")):
+            raise ValueError(
+                f"PS5 retail PKG detected ({meta.game_title or title_id}).\n\n"
+                "PS5 retail PKGs are hardware-encrypted with Sony Prospero SAMU keys and cannot "
+                "be decrypted or unpacked on PC.\n\n"
+                "To convert PS5 games for ShadowMount / FFPFSC:\n"
+                "• Dump the game directly on your jailbroken PS5 console using Itemzflow or Game Dumper.\n"
+                "• Dump as a decrypted game folder (/app0/), .exfat container, or .ffpkg container.\n"
+                "• Those formats can then be converted directly to .ffpfsc."
+            )
+
+        tool_info = cls.locate_tool()
+        if not tool_info:
+            tools_dir = Path(__file__).resolve().parent.parent / "tools"
+            raise PkgExtractorNotFoundError(
+                f"PS4 PKG extraction requires an external extraction utility.\n\n"
+                f"Please place 'orbis-pub-cmd.exe', 'ps4-pkg-tool.exe', or 'shadpkg.exe' "
+                f"into the tools directory:\n{tools_dir}\n\n"
+                f"or install it on your system PATH."
+            )
+
+        tool_path, tool_type = tool_info
+        if log_fn:
+            log_fn("INFO", f"Using PKG extractor: {tool_path} ({tool_type})")
+
+        out_dir = dest_root / title_id
+        if out_dir.exists():
+            shutil.rmtree(out_dir, ignore_errors=True)
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        if tool_type == "orbis-pub-cmd":
+            cmd = [tool_path, "pkg_extract", "--passcode", "00000000000000000000000000000000", str(pkg_path), str(out_dir)]
+        elif tool_type == "shadpkg":
+            cmd = [tool_path, "extract", str(pkg_path), str(out_dir)]
+        elif tool_type == "ps4-pkg-tool":
+            cmd = [tool_path, str(pkg_path), str(out_dir)]
+        elif tool_type == "pkg_pfs_tool":
+            cmd = [tool_path, "--extract", str(pkg_path), str(out_dir)]
+        else:
+            cmd = [tool_path, str(pkg_path), str(out_dir)]
+
+        if log_fn:
+            log_fn("INFO", f"Executing: {' '.join(cmd)}")
+
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if proc_callback:
+            proc_callback(proc)
+
+        last_progress_time = time.time()
+        for line in proc.stdout:
+            if cancel_check and cancel_check():
+                proc.terminate()
+                try:
+                    proc.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                shutil.rmtree(out_dir, ignore_errors=True)
+                raise ExtractionCancelledError("PKG extraction cancelled by user.")
+
+            clean_line = line.strip()
+            if not clean_line:
+                continue
+
+            m = re.search(r'(\d{1,3})%', clean_line)
+            if m and progress_fn:
+                try:
+                    pct = int(m.group(1))
+                    progress_fn(min(100, max(0, pct)), clean_line)
+                except Exception:
+                    pass
+            elif log_fn and time.time() - last_progress_time > 2.0:
+                last_progress_time = time.time()
+                log_fn("INFO", clean_line)
+
+        rc = proc.wait()
+        if rc != 0:
+            if cancel_check and cancel_check():
+                raise ExtractionCancelledError("PKG extraction cancelled by user.")
+            raise PkgExtractionError(f"{tool_type} failed with exit code {rc}")
+
+        games = find_game_folders(out_dir)
+        game_root = games[0] if games else out_dir
+
+        # Ensure sce_sys/param.json exists for ShadowMount on PS5!
+        sce_sys = game_root / "sce_sys"
+        param_json = sce_sys / "param.json"
+        param_sfo = sce_sys / "param.sfo"
+        if sce_sys.is_dir() and not param_json.is_file() and param_sfo.is_file():
+            try:
+                sfo_data = _parse_sfo(param_sfo.read_bytes())
+                sfo_title_id = sfo_data.get("TITLE_ID", title_id)
+                sfo_title = sfo_data.get("TITLE", meta.game_title or title_id)
+                generated_json = {
+                    "titleId": sfo_title_id,
+                    "titleName": sfo_title,
+                    "localizedParameters": {
+                        "defaultLanguage": "en-US",
+                        "en-US": {
+                            "titleName": sfo_title
+                        }
+                    }
+                }
+                param_json.write_text(json.dumps(generated_json, indent=2), encoding="utf-8")
+                if log_fn:
+                    log_fn("OK", f"Generated ShadowMount sce_sys/param.json for {sfo_title_id}")
+            except Exception as e:
+                if log_fn:
+                    log_fn("WARN", f"Could not auto-generate param.json from param.sfo: {e}")
+
+        return game_root
+
+
 class ArchiveExtractor:
-    SUPPORTED = {".zip", ".rar", ".7z"}
+    SUPPORTED = {".zip", ".rar", ".7z", ".pkg"}
 
     @staticmethod
     def extract(archive: Path, dest_root: Path, log_fn=None, progress_fn=None,
@@ -379,6 +601,13 @@ class ArchiveExtractor:
                 cancel_check=None, proc_callback=None) -> Path:
         dest = dest_root / archive.stem
         suffix = archive.suffix.lower()
+
+        if suffix == ".pkg":
+            return PkgExtractor.extract(
+                archive, dest_root,
+                log_fn=log_fn, progress_fn=progress_fn,
+                cancel_check=cancel_check, proc_callback=proc_callback
+            )
 
         candidates: list[str] = []
         if password and password.strip():
@@ -624,6 +853,7 @@ class ArchiveExtractor:
 
 class GameItem:
     ampr_emu: bool = False
+    _pkg_icon_bytes: bytes | None = None
 
     def __init__(self, path: Path):
         self.path = Path(path) if path else None
@@ -633,6 +863,7 @@ class GameItem:
         self.size = folder_size(self.path) if self.path else 0
         self.files = file_count(self.path) if self.path else 0
         self.artwork = find_artwork(self.path) if self.path else None
+        self._pkg_icon_bytes = None
         self.status = "Queued"
         self.ampr_emu = is_apr_game(self.path) if self.path else False
 
@@ -646,8 +877,34 @@ class GameItem:
         obj.size = archive.stat().st_size if archive.exists() else 0
         obj.files = 0
         obj.artwork = None
+        obj._pkg_icon_bytes = None
         obj.status = "Pending Extract"
         obj.ampr_emu = False
+        return obj
+
+    @classmethod
+    def from_pkg(cls, pkg: Path) -> "GameItem":
+        obj = cls.__new__(cls)
+        obj.path = None
+        obj.archive_path = Path(pkg)
+        obj.size = pkg.stat().st_size if pkg.exists() else 0
+        obj.files = 0
+        obj.artwork = None
+        obj._pkg_icon_bytes = None
+        obj.status = "Pending Extract"
+        obj.ampr_emu = False
+
+        try:
+            from mkpfs.game_metadata import read_game_metadata
+            meta = read_game_metadata(pkg)
+            obj.name = meta.game_title if meta.game_title else pkg.stem
+            obj.title_id = meta.title_id if (meta.title_id and meta.title_id != "—") else "📦"
+            if meta.icon_bytes:
+                obj._pkg_icon_bytes = meta.icon_bytes
+        except Exception:
+            obj.name = pkg.stem
+            obj.title_id = "📦"
+
         return obj
 
     @classmethod
@@ -660,6 +917,7 @@ class GameItem:
         obj.size = exfat_file.stat().st_size if exfat_file.exists() else 0
         obj.files = 1
         obj.artwork = None
+        obj._pkg_icon_bytes = None
         obj.status = "Queued"
         obj.ampr_emu = False
         return obj
@@ -675,7 +933,7 @@ class GameItem:
             "files": self.files,
             "status": self.status,
             "ampr_emu": self.ampr_emu,
-            "has_artwork": bool(self.artwork and self.artwork.exists()),
+            "has_artwork": bool((self.artwork and self.artwork.exists()) or getattr(self, "_pkg_icon_bytes", None)),
         }
 
 
@@ -691,26 +949,32 @@ def scan_path_for_items(target_path: Path) -> list[GameItem]:
     if target.is_file() and target.suffix.lower() in (".exfat", ".ffpkg"):
         return [GameItem.from_exfat(target)]
 
-    # 2. Single archive
+    # 2. Single PKG file
+    if target.is_file() and target.suffix.lower() == ".pkg":
+        return [GameItem.from_pkg(target)]
+
+    # 3. Single archive
     if target.is_file() and target.suffix.lower() in (".zip", ".rar", ".7z"):
         return [GameItem.from_archive(target)]
 
-    # 3. Direct PS5 game folder (has sce_sys/param.json or eboot.bin)
-    if (target / "sce_sys" / "param.json").exists() or (target / "eboot.bin").exists():
+    # 4. Direct PS5/PS4 game folder (has sce_sys/param.json, sce_sys/param.sfo or eboot.bin)
+    if (target / "sce_sys" / "param.json").exists() or (target / "sce_sys" / "param.sfo").exists() or (target / "eboot.bin").exists():
         return [GameItem(target)]
 
     results: list[GameItem] = []
 
-    # 4. Multi-item parent directory: inspect immediate subfolders
+    # 5. Multi-item parent directory: inspect immediate subfolders
     if target.is_dir():
         for sub in sorted(target.iterdir()):
             if sub.is_dir():
-                if (sub / "sce_sys" / "param.json").exists() or (sub / "eboot.bin").exists() or TITLE_RE.search(sub.name):
+                if (sub / "sce_sys" / "param.json").exists() or (sub / "sce_sys" / "param.sfo").exists() or (sub / "eboot.bin").exists() or TITLE_RE.search(sub.name):
                     results.append(GameItem(sub))
             elif sub.is_file():
                 suf = sub.suffix.lower()
                 if suf in (".exfat", ".ffpkg"):
                     results.append(GameItem.from_exfat(sub))
+                elif suf == ".pkg":
+                    results.append(GameItem.from_pkg(sub))
                 elif suf in (".zip", ".rar", ".7z"):
                     results.append(GameItem.from_archive(sub))
 
@@ -1336,7 +1600,7 @@ class QueueEngine:
                             "path": str(item),
                             "is_dir": is_dir,
                             "size": format_size(item.stat().st_size) if not is_dir else "",
-                            "is_game_candidate": is_dir or item.suffix.lower() in (".zip", ".rar", ".7z", ".exfat", ".ffpkg"),
+                            "is_game_candidate": is_dir or item.suffix.lower() in (".zip", ".rar", ".7z", ".pkg", ".exfat", ".ffpkg"),
                         })
                     except (PermissionError, OSError):
                         pass

@@ -17,6 +17,22 @@ MkPFS 1.1.0 — INTEGRATED STATIC ENGINE UPGRADE
   • Cleaned up UI component version display: MkPFS now reports as
     Integrated v1.1.0 across desktop UI, WebUI, and CLI
 
+PLAYSTATION PKG SUPPORT (.pkg)
+
+  • Native PKG handling: Drag & drop, single file selection, folder scanning,
+    and automatic queue processing for PlayStation .pkg files
+  • High-speed metadata parsing: Pure-Python reading of Title ID, game title,
+    and icon0.png artwork directly from PKG headers without external tools
+  • External extractor engine: Automatic discovery of extraction utilities
+    (orbis-pub-cmd, ps4-pkg-tool, shadpkg, pkg_pfs_tool) in tools/ or PATH
+  • ShadowMount param.json auto-synthesis: Extracts param.sfo from PS4 PKGs
+    and automatically synthesizes sce_sys/param.json to ensure 100% ShadowMount
+    and PS5 compatibility
+  • Retail PS5 PKG guard: Cleanly identifies encrypted PS5 retail PKGs (PPSA/PUSA)
+    and guides users to on-console decrypted dumps (SAMU hardware limitation)
+  • Cancellation & progress support: Real-time percentage tracking and clean
+    subprocess termination during PKG extraction
+
 MkPFS 0.0.9 — SINGLE-PASS PIPELINE UPGRADE
 
   • pack folder now streams directly to a final exFAT-wrapped .ffpfsc

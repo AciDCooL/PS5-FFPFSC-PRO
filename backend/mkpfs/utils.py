@@ -65,15 +65,25 @@ def title_id_from_source(source_root: Path) -> str | None:
         unreadable.
     """
     param_json: Path = source_root / "sce_sys" / "param.json"
-    if not param_json.exists():
-        return None
-    try:
-        parsed: dict[str, object] = read_param_json(param_json)
-    except ValueError:
-        return None
-    value: object | None = parsed.get("titleId") or parsed.get("title_id")
-    if isinstance(value, str) and value.strip():
-        return value.strip()
+    if param_json.exists():
+        try:
+            parsed: dict[str, object] = read_param_json(param_json)
+            value: object | None = parsed.get("titleId") or parsed.get("title_id")
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        except ValueError:
+            pass
+
+    param_sfo: Path = source_root / "sce_sys" / "param.sfo"
+    if param_sfo.exists():
+        try:
+            from .game_metadata import _parse_sfo
+            sfo = _parse_sfo(param_sfo.read_bytes())
+            val = sfo.get("TITLE_ID")
+            if val and isinstance(val, str) and val.strip():
+                return val.strip()
+        except Exception:
+            pass
     return None
 
 

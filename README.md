@@ -76,12 +76,15 @@ Whether you're compressing a single game, batch processing multiple titles, or b
 
 ## 📂 Supported Inputs
 
-* PS5 game folders
-* `.exfat` images
-* `.ffpkg` images
+* PS5 game folders (`/app0/` format with `sce_sys/param.json` or `eboot.bin`)
+* PlayStation `.pkg` packages (PS4 PKGs extracted and synthesized with `sce_sys/param.json` for ShadowMount)
+* `.exfat` disk images
+* `.ffpkg` containers
 * `.zip` archives
 * `.rar` archives
 * `.7z` archives
+
+> **Note on PKGs**: PS4 PKG extraction utilizes utilities in the `tools/` folder (such as `orbis-pub-cmd`, `ps4-pkg-tool`, or `shadpkg`). PS5 retail PKGs (`PPSA...`) are encrypted with Sony SAMU hardware keys and must be dumped directly on a jailbroken console as decrypted folders or containers.
 
 ---
 

@@ -72,6 +72,16 @@ def get_title_id(item_path: Path) -> str:
                         return re.sub(r'[:*?"<>|™®\\]', '', title).strip('. ')
         except Exception as e:
             print(f"[WARN] Could not parse param.json for title ID: {e}")
+        param_sfo = item_path / "sce_sys" / "param.sfo"
+        try:
+            if param_sfo.is_file():
+                from mkpfs.game_metadata import _parse_sfo
+                sfo = _parse_sfo(param_sfo.read_bytes())
+                title = sfo.get("TITLE_ID", "")
+                if title:
+                    return re.sub(r'[:*?"<>|™®\\]', '', title).strip('. ')
+        except Exception as e:
+            print(f"[WARN] Could not parse param.sfo for title ID: {e}")
     raw_name = get_title_id_from_name(item_path.name)
     return re.sub(r'[:*?"<>|™®\\]', '', raw_name).strip('. ')
 
@@ -96,6 +106,18 @@ def get_game_name(item_path: Path) -> str:
                             return clean
         except Exception as e:
             print(f"[WARN] Could not parse param.json for game name: {e}")
+        param_sfo = item_path / "sce_sys" / "param.sfo"
+        try:
+            if param_sfo.is_file():
+                from mkpfs.game_metadata import _parse_sfo
+                sfo = _parse_sfo(param_sfo.read_bytes())
+                title = sfo.get("TITLE", "")
+                if title:
+                    clean = re.sub(r'[\/:*?"<>|™®\\]', '', title).strip('. ')
+                    if clean:
+                        return clean
+        except Exception:
+            pass
     # Fallback to sanitized stem without common dump suffixes
     clean_stem = re.sub(r'[\/:*?"<>|™®\\]', '', item_path.stem).strip('. ')
     for suffix in [".exfat", ".ffpkg", "-app0", "-app", "-patch0", "-patch"]:
@@ -132,7 +154,9 @@ def find_game_items(path: Path, batch: bool = False) -> list[Path]:
             if Path(f).suffix.lower() in _DISK_IMAGE_SUFFIXES:
                 valid_items.append(curr / f)
 
-        if (curr / "eboot.bin").is_file() and (curr / "sce_sys" / "param.json").is_file():
+        if (curr / "eboot.bin").is_file() and (
+            (curr / "sce_sys" / "param.json").is_file() or (curr / "sce_sys" / "param.sfo").is_file()
+        ):
             valid_items.append(curr)
             game_roots.add(curr)
             subdirs.clear()  # don't recurse into the game folder

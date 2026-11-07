@@ -46,6 +46,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Path dist_package
           Copy-Item dist\PS5_FFPFSC_PRO.exe dist_package\
+          Copy-Item -Recurse tools dist_package\tools
           Copy-Item README.md dist_package\
           Copy-Item CHANGELOG.txt dist_package\
           Compress-Archive -Path dist_package\* -DestinationPath PS5-FFPFSC-PRO-Windows-x64.zip

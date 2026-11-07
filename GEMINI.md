@@ -135,3 +135,34 @@ When refactoring large GUI codebases, beware of these subtle Python runtime erro
 - **Static MkPFS Integration (v1.1.0+)**: `mkpfs` is integrated statically into `backend/mkpfs/` with dependencies (`zlib-ng>=0.5.1`, `isal>=1.0.0`, `cryptography>=47.0.0`) pinned in `requirements.txt`. Do NOT use dynamic runtime plugin loading (`plugins/` folder via `--no-deps`) as compiled C-extensions fail when external wheels are loaded dynamically without native binaries.
 - **Output Preservation**: Always pass `--no-adjust-output-file-extension` when invoking MkPFS `pack folder` or `pack file` so output filenames are never mutated unexpectedly.
 - **Silent Startup Checks**: Never display intrusive popups on startup for component updates. Check GitHub silently in a background thread; if an update exists, update the Settings button badge (`⚙ Settings ●`) and log an informative message.
+
+---
+
+## 8. PlayStation Package (.pkg) Handling & ShadowMount Compatibility
+
+The application natively supports `.pkg` files alongside archives (`.zip`, `.rar`, `.7z`) and disk images (`.exfat`, `.ffpkg`).
+
+### PS5 Retail PKG vs. PS4 PKG Technical Distinction
+- **PS5 Retail PKGs (`PPSA...`, `PUSA...`)**:
+  - Hardware-encrypted using Sony Prospero SAMU keys.
+  - PC extraction is mathematically impossible without console keys.
+  - The app must immediately catch `title_id.startswith(("PPSA", "PUSA"))` and guide the user to dump decrypted folders (`/app0/`) or containers directly on their jailbroken PS5 using Itemzflow or Game Dumper.
+- **PS4 PKGs (`CUSA...`, Fake PKGs / FPKGs)**:
+  - Unpackable on PC using standard test keys / zero passcode (`00000000000000000000000000000000`).
+  - Extracted using tools in `tools/` or PATH (`orbis-pub-cmd`, `ps4-pkg-tool`, `shadpkg`, `pkg_pfs_tool`).
+
+### Key Implementation Patterns:
+1. **Zero-Wait Metadata Parsing**:
+   - `backend/mkpfs/game_metadata.py` (`read_game_metadata`) reads Title ID, Game Title, and `icon0.png` directly from PKG headers in pure Python without unpacking the package.
+   - When added to the queue, `GameItem.from_pkg(pkg)` displays title, Title ID, and artwork immediately.
+2. **External Tool Discovery (`PkgExtractor.locate_tool`)**:
+   - Scans `tools/` in script/app dir, `APP_DIR/tools`, and system PATH.
+   - If missing, raises `PkgExtractorNotFoundError` explaining which utility to place in `tools/`.
+3. **ShadowMount Compatibility & `param.json` Auto-Synthesis**:
+   - PS4 PKGs contain `sce_sys/param.sfo` but lack PS5 `sce_sys/param.json`.
+   - ShadowMount on PS5 requires `param.json` to mount and index the title in the PS5 home menu.
+   - `PkgExtractor.extract()` automatically parses `param.sfo` and writes a clean `sce_sys/param.json` into the extracted game root prior to packing into `.ffpfsc`.
+4. **Streaming Cancellation & Progress**:
+   - Subprocess lines are regex-parsed for `\d+%` to provide real-time UI progress updates.
+   - Fully interruptible via `cancel_check` and `proc_callback`, cleanly killing the extractor process and deleting partial output directories upon user cancellation.
+

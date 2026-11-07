@@ -334,7 +334,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       <div class="form-group">
         <label>Add Game / Folder / Archive</label>
         <div class="input-row">
-          <input type="text" id="addPathInput" placeholder="/games/PPSA01234 or /path/game.zip">
+          <input type="text" id="addPathInput" placeholder="/games/PPSA01234, game.pkg, or game.zip">
           <button class="btn btn-sm" onclick="openFsModal()">📁 Browse</button>
         </div>
         <button class="btn btn-green" style="width:100%; justify-content:center; margin-top:4px;" onclick="addPathToQueue()">➕ Scan & Add to Queue</button>
@@ -1072,7 +1072,7 @@ class WebHandler(BaseHTTPRequestHandler):
             if added:
                 self._send_json({"ok": True, "added": added})
             else:
-                self._send_json({"ok": False, "error": f"No compatible PS5 games, archives, or images found at: {target_path}"}, status=400)
+                self._send_json({"ok": False, "error": f"No compatible games, archives, PKGs, or images found at: {target_path}"}, status=400)
             return
 
         if path == "/api/queue/remove":
