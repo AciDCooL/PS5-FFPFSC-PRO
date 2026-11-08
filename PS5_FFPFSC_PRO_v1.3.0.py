@@ -1602,6 +1602,7 @@ class PkgExtractionError(RuntimeError):
 
 class PkgExtractor:
     EXTRACTOR_CANDIDATES = [
+        "prospero-pub-cmd",
         "shadpkg",
         "orbis-pub-cmd",
         "ps4-pkg-tool",
@@ -1609,9 +1610,9 @@ class PkgExtractor:
     ]
 
     @classmethod
-    def locate_tool(cls) -> tuple[str, str] | None:
+    def locate_tool(cls, is_ps5: bool = False) -> tuple[str, str] | None:
         """Return (tool_path, tool_type) or None if no extractor is available.
-        tool_type is one of: 'shadpkg', 'orbis-pub-cmd', 'ps4-pkg-tool', 'pkg_pfs_tool'.
+        tool_type is one of: 'prospero-pub-cmd', 'shadpkg', 'orbis-pub-cmd', 'ps4-pkg-tool', 'pkg_pfs_tool'.
         """
         _script_dir = Path(getattr(sys, "frozen", None) and sys.executable or __file__).resolve().parent
         search_dirs = [
@@ -1622,7 +1623,12 @@ class PkgExtractor:
 
         exts = [".exe", ""] if sys.platform == "win32" else ["", "-debian", "-macos", ".exe"]
 
-        for name in cls.EXTRACTOR_CANDIDATES:
+        candidates = list(cls.EXTRACTOR_CANDIDATES)
+        if not is_ps5:
+            # For PS4 PKGs, prioritize shadpkg
+            candidates.sort(key=lambda c: 0 if c == "shadpkg" else 1)
+
+        for name in candidates:
             for sdir in search_dirs:
                 for ext in exts:
                     candidate = sdir / f"{name}{ext}"
@@ -1683,37 +1689,26 @@ class PkgExtractor:
     @classmethod
     def extract(cls, pkg_path: Path, dest_root: Path, log_fn=None, progress_fn=None,
                 cancel_check=None, proc_callback=None) -> Path:
-        """Extract a PS4 PKG to dest_root/<title_id_or_stem> and return extracted game directory."""
+        """Extract a PS4/PS5 PKG to dest_root/<title_id_or_stem> and return extracted game directory."""
         from mkpfs.game_metadata import read_game_metadata, _parse_sfo
 
         meta = read_game_metadata(pkg_path)
         title_id = meta.title_id if (meta.title_id and meta.title_id != "—") else pkg_path.stem
+        is_ps5 = title_id.startswith(("PPSA", "PUSA"))
 
-        # Check for PS5 PKG (cannot be decrypted on PC)
-        if title_id.startswith(("PPSA", "PUSA")):
-            raise ValueError(
-                f"PS5 retail PKG detected ({meta.game_title or title_id}).\n\n"
-                "PS5 retail PKGs are hardware-encrypted with Sony Prospero SAMU keys and cannot "
-                "be decrypted or unpacked on PC.\n\n"
-                "To convert PS5 games for ShadowMount / FFPFSC:\n"
-                "• Dump the game directly on your jailbroken PS5 console using Itemzflow or Game Dumper.\n"
-                "• Dump as a decrypted game folder (/app0/), .exfat container, or .ffpkg container.\n"
-                "• Those formats can then be converted directly to .ffpfsc."
-            )
-
-        tool_info = cls.locate_tool()
+        tool_info = cls.locate_tool(is_ps5=is_ps5)
         if not tool_info:
             if log_fn:
                 log_fn("INFO", "PKG extractor not found locally. Attempting automatic download of shadpkg...")
             if cls.download_shadpkg(log_fn=log_fn):
-                tool_info = cls.locate_tool()
+                tool_info = cls.locate_tool(is_ps5=is_ps5)
 
         if not tool_info:
             _script_dir = Path(getattr(sys, "frozen", None) and sys.executable or __file__).resolve().parent
             tools_dir = _script_dir / "tools"
             raise PkgExtractorNotFoundError(
-                f"PS4 PKG extraction requires an external extraction utility.\n\n"
-                f"Please place 'shadpkg.exe', 'orbis-pub-cmd.exe', or 'ps4-pkg-tool.exe' "
+                f"PKG extraction requires an external extraction utility.\n\n"
+                f"Please place 'shadpkg.exe', 'prospero-pub-cmd.exe', or 'orbis-pub-cmd.exe' "
                 f"into the tools directory:\n{tools_dir}\n\n"
                 f"or install it on your system PATH."
             )
@@ -1727,7 +1722,7 @@ class PkgExtractor:
             shutil.rmtree(out_dir, ignore_errors=True)
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        if tool_type == "orbis-pub-cmd":
+        if tool_type in ("prospero-pub-cmd", "orbis-pub-cmd"):
             cmd = [tool_path, "pkg_extract", "--passcode", "00000000000000000000000000000000", str(pkg_path), str(out_dir)]
         elif tool_type == "shadpkg":
             cmd = [tool_path, "extract", str(pkg_path), str(out_dir)]
@@ -1752,6 +1747,7 @@ class PkgExtractor:
         if proc_callback:
             proc_callback(proc)
 
+        recent_lines: list[str] = []
         last_progress_time = time.time()
         for line in proc.stdout:
             if cancel_check and cancel_check():
@@ -1766,6 +1762,10 @@ class PkgExtractor:
             clean_line = line.strip()
             if not clean_line:
                 continue
+
+            recent_lines.append(clean_line)
+            if len(recent_lines) > 25:
+                recent_lines.pop(0)
 
             m = re.search(r'(\d{1,3})%', clean_line)
             if m and progress_fn:
@@ -1782,17 +1782,33 @@ class PkgExtractor:
         if rc != 0:
             if cancel_check and cancel_check():
                 raise ExtractionCancelledError("PKG extraction cancelled by user.")
-            raise PkgExtractionError(f"{tool_type} failed with exit code {rc}")
+            tail_msg = "\n".join(recent_lines[-6:]) if recent_lines else ""
+            err_msg = f"{tool_type} failed with exit code {rc}."
+            if tail_msg:
+                err_msg += f"\n\nOutput:\n{tail_msg}"
+            if is_ps5:
+                err_msg += (
+                    f"\n\nNote for PS5 title {title_id}:\n"
+                    "• If this is a PS5 Fake PKG (FPKG), ensure 'prospero-pub-cmd.exe' is placed in your tools/ directory.\n"
+                    "• If this is a retail PS5 package, it is encrypted with Sony SAMU hardware keys and cannot be decrypted on PC.\n"
+                    "  Dump the game directly on your jailbroken PS5 console using Itemzflow or Game Dumper as a decrypted folder (/app0/) or .exfat/.ffpkg image."
+                )
+            raise PkgExtractionError(err_msg)
 
+        # Locate game_root: check for sce_sys/param.json (native PS5) or sce_sys/param.sfo (PS4)
         games = find_game_folders(out_dir)
         game_root = games[0] if games else out_dir
 
-        # Ensure sce_sys/param.json exists for ShadowMount on PS5!
+        for pjson in out_dir.rglob("param.json"):
+            if pjson.parent.name == "sce_sys":
+                game_root = pjson.parent.parent
+                break
+
         sce_sys = game_root / "sce_sys"
         param_json = sce_sys / "param.json"
         param_sfo = sce_sys / "param.sfo"
 
-        if not param_sfo.is_file():
+        if not param_sfo.is_file() and not param_json.is_file():
             found_sfos = list(game_root.rglob("param.sfo"))
             if found_sfos:
                 param_sfo = found_sfos[0]

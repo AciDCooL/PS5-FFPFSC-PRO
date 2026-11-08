@@ -9,9 +9,10 @@ Included out-of-the-box:
     Source & Releases: https://github.com/seregonwar/ShadPKG
 
 Other supported extraction utilities (optional alternatives):
-  • orbis-pub-cmd.exe  (Official Publishing Tools PKG extractor)
-  • ps4-pkg-tool.exe   (PS4 PKG Tool command-line utility)
-  • pkg_pfs_tool.exe   (Flatz PKG / PFS unpacker)
+  • prospero-pub-cmd.exe (Official Prospero PS5 Publishing Tools extractor)
+  • orbis-pub-cmd.exe    (Official Orbis PS4 Publishing Tools extractor)
+  • ps4-pkg-tool.exe     (PS4 PKG Tool command-line utility)
+  • pkg_pfs_tool.exe     (Flatz PKG / PFS unpacker)
 
 When any of these tools is present here or on your system PATH,
 PS5 FFPFSC PRO automatically unpacks PS4 Fake PKGs (.pkg),
