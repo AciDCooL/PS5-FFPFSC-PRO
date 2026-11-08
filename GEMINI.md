@@ -142,14 +142,16 @@ When refactoring large GUI codebases, beware of these subtle Python runtime erro
 
 The application natively supports `.pkg` files alongside archives (`.zip`, `.rar`, `.7z`) and disk images (`.exfat`, `.ffpkg`).
 
-### PS5 Retail PKG vs. PS4 PKG Technical Distinction
-- **PS5 Retail PKGs (`PPSA...`, `PUSA...`)**:
-  - Hardware-encrypted using Sony Prospero SAMU keys.
-  - PC extraction is mathematically impossible without console keys.
-  - The app must immediately catch `title_id.startswith(("PPSA", "PUSA"))` and guide the user to dump decrypted folders (`/app0/`) or containers directly on their jailbroken PS5 using Itemzflow or Game Dumper.
-- **PS4 PKGs (`CUSA...`, Fake PKGs / FPKGs)**:
-  - Unpackable on PC using standard test keys / zero passcode (`00000000000000000000000000000000`).
-  - Extracted using tools in `tools/` or PATH (`orbis-pub-cmd`, `ps4-pkg-tool`, `shadpkg`, `pkg_pfs_tool`).
+### PS5 PKGs vs PS4 PKGs vs PS5 FPKGs Technical Architecture
+- **PS5 Fake PKGs (FPKGs) & PS4 PKGs**:
+  - Encrypted with the standard test passcode (`00000000000000000000000000000000`).
+  - PS5 FPKGs use AES-128-XTS outer/inner PFS decryption with SHA3-256 EKpfs key derivation.
+  - Handled on PC out of the box using clean-room `ProsperoPkgTool` (MIT, bundled in `tools/`) or `prospero-pub-cmd`.
+  - PS4 PKGs are handled out of the box with `shadpkg` (bundled in `tools/`) or `orbis-pub-cmd`.
+  - Both inner PFS game assets and outer CNT metadata (`sce_sys/param.json`, `icon0.png`, art) are unpacked and converted directly to `.ffpfsc` containers.
+- **PS5 Retail PKGs**:
+  - Hardware-encrypted with Sony Prospero SAMU keys and cannot be decrypted on PC without console hardware.
+  - If extraction fails on a retail package, the app advises the user to dump the game directly on their jailbroken console using Itemzflow or Game Dumper (as a decrypted folder `/app0/`, `.exfat`, or `.ffpkg`).
 
 ### Key Implementation Patterns:
 1. **Zero-Wait Metadata Parsing**:

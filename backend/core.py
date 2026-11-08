@@ -431,6 +431,8 @@ class PkgExtractionError(RuntimeError):
 
 class PkgExtractor:
     EXTRACTOR_CANDIDATES = [
+        "ProsperoPkgTool",
+        "prosperopkgtool",
         "prospero-pub-cmd",
         "shadpkg",
         "orbis-pub-cmd",
@@ -441,7 +443,7 @@ class PkgExtractor:
     @classmethod
     def locate_tool(cls, is_ps5: bool = False) -> tuple[str, str] | None:
         """Return (tool_path, tool_type) or None if no extractor is available.
-        tool_type is one of: 'prospero-pub-cmd', 'shadpkg', 'orbis-pub-cmd', 'ps4-pkg-tool', 'pkg_pfs_tool'.
+        tool_type is one of: 'ProsperoPkgTool', 'prospero-pub-cmd', 'shadpkg', 'orbis-pub-cmd', 'ps4-pkg-tool', 'pkg_pfs_tool'.
         """
         _script_dir = Path(getattr(sys, "frozen", None) and sys.executable or __file__).resolve().parent
         if _script_dir.name == "backend":
@@ -456,9 +458,10 @@ class PkgExtractor:
         exts = [".exe", ""] if sys.platform == "win32" else ["", "-debian", "-macos", ".exe"]
 
         candidates = list(cls.EXTRACTOR_CANDIDATES)
-        if not is_ps5:
-            # For PS4 PKGs, prioritize shadpkg
-            candidates.sort(key=lambda c: 0 if c == "shadpkg" else 1)
+        if is_ps5:
+            candidates.sort(key=lambda c: 0 if c in ("ProsperoPkgTool", "prosperopkgtool", "prospero-pub-cmd") else 1)
+        else:
+            candidates.sort(key=lambda c: 0 if c == "shadpkg" else (1 if c == "orbis-pub-cmd" else 2))
 
         for name in candidates:
             for sdir in search_dirs:
@@ -472,6 +475,67 @@ class PkgExtractor:
                 return found, name
 
         return None
+
+    @classmethod
+    def extract_pkg_metadata_files(cls, pkg_path: Path, sce_sys_dir: Path) -> None:
+        """Extract outer CNT metadata files (param.json, param.sfo, icon0.png) from PKG into sce_sys_dir."""
+        try:
+            sce_sys_dir.mkdir(parents=True, exist_ok=True)
+            with open(pkg_path, "rb") as fh:
+                magic = fh.read(4)
+                if magic != b"\x7fCNT":
+                    return
+                fh.seek(0x10)
+                entry_count = int.from_bytes(fh.read(4), "big")
+                fh.seek(0x18)
+                entry_table_offset = int.from_bytes(fh.read(4), "big")
+                if entry_count == 0 or entry_count > 4096 or entry_table_offset == 0:
+                    return
+
+                for index in range(entry_count):
+                    entry_base = entry_table_offset + index * 0x20
+                    fh.seek(entry_base)
+                    entry_id = int.from_bytes(fh.read(4), "big")
+                    fh.seek(entry_base + 0x10)
+                    data_offset = int.from_bytes(fh.read(4), "big")
+                    data_size = int.from_bytes(fh.read(4), "big")
+
+                    if data_size == 0 or data_size > 10 * 1024 * 1024:
+                        continue
+
+                    # 0x2000 = PS5 param.json, 0x1000 = PS4 param.sfo / PS5 param.json
+                    if entry_id in (0x2000, 0x1000):
+                        target_file = sce_sys_dir / ("param.json" if entry_id == 0x2000 else "param.sfo")
+                        if not target_file.is_file():
+                            fh.seek(data_offset)
+                            raw = fh.read(data_size)
+                            if raw.startswith(b"\x00PSF"):
+                                (sce_sys_dir / "param.sfo").write_bytes(raw)
+                            elif raw.strip().startswith(b"{"):
+                                (sce_sys_dir / "param.json").write_bytes(raw)
+                    elif entry_id == 0x1200:
+                        icon_file = sce_sys_dir / "icon0.png"
+                        if not icon_file.is_file():
+                            fh.seek(data_offset)
+                            raw = fh.read(data_size)
+                            if raw.startswith(b"\x89PNG"):
+                                icon_file.write_bytes(raw)
+                    elif entry_id == 0x1220:
+                        pic0_file = sce_sys_dir / "pic0.png"
+                        if not pic0_file.is_file():
+                            fh.seek(data_offset)
+                            raw = fh.read(data_size)
+                            if raw.startswith(b"\x89PNG"):
+                                pic0_file.write_bytes(raw)
+                    elif entry_id == 0x1240:
+                        pic1_file = sce_sys_dir / "pic1.png"
+                        if not pic1_file.is_file():
+                            fh.seek(data_offset)
+                            raw = fh.read(data_size)
+                            if raw.startswith(b"\x89PNG"):
+                                pic1_file.write_bytes(raw)
+        except Exception:
+            pass
 
     @classmethod
     def download_shadpkg(cls, log_fn=None) -> bool:
@@ -545,7 +609,7 @@ class PkgExtractor:
             tools_dir = _script_dir / "tools"
             raise PkgExtractorNotFoundError(
                 f"PKG extraction requires an external extraction utility.\n\n"
-                f"Please place 'shadpkg.exe', 'prospero-pub-cmd.exe', or 'orbis-pub-cmd.exe' "
+                f"Please place 'ProsperoPkgTool.exe', 'shadpkg.exe', or 'prospero-pub-cmd.exe' "
                 f"into the tools directory:\n{tools_dir}\n\n"
                 f"or install it on your system PATH."
             )
@@ -559,7 +623,9 @@ class PkgExtractor:
             shutil.rmtree(out_dir, ignore_errors=True)
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        if tool_type in ("prospero-pub-cmd", "orbis-pub-cmd"):
+        if tool_type.lower() in ("prosperopkgtool", "prospero-pkg-tool"):
+            cmd = [tool_path, "img_extract", str(pkg_path), str(out_dir), "--passcode", "00000000000000000000000000000000", "--verbose"]
+        elif tool_type in ("prospero-pub-cmd", "orbis-pub-cmd"):
             cmd = [tool_path, "pkg_extract", "--passcode", "00000000000000000000000000000000", str(pkg_path), str(out_dir)]
         elif tool_type == "shadpkg":
             cmd = [tool_path, "extract", str(pkg_path), str(out_dir)]
@@ -626,8 +692,8 @@ class PkgExtractor:
             if is_ps5:
                 err_msg += (
                     f"\n\nNote for PS5 title {title_id}:\n"
-                    "• If this is a PS5 Fake PKG (FPKG), ensure 'prospero-pub-cmd.exe' is placed in your tools/ directory.\n"
-                    "• If this is a retail PS5 package, it is encrypted with Sony SAMU hardware keys and cannot be decrypted on PC.\n"
+                    "• PS5 Fake PKGs (FPKGs) are extracted using 'ProsperoPkgTool' (bundled) with the standard zero passcode.\n"
+                    "• If this is an encrypted retail PS5 package, it cannot be decrypted on PC without console hardware SAMU keys.\n"
                     "  Dump the game directly on your jailbroken PS5 console using Itemzflow or Game Dumper as a decrypted folder (/app0/) or .exfat/.ffpkg image."
                 )
             raise PkgExtractionError(err_msg)
@@ -642,6 +708,8 @@ class PkgExtractor:
                 break
 
         sce_sys = game_root / "sce_sys"
+        cls.extract_pkg_metadata_files(pkg_path, sce_sys)
+
         param_json = sce_sys / "param.json"
         param_sfo = sce_sys / "param.sfo"
 
@@ -650,6 +718,7 @@ class PkgExtractor:
             if found_sfos:
                 param_sfo = found_sfos[0]
                 sce_sys = param_sfo.parent
+                cls.extract_pkg_metadata_files(pkg_path, sce_sys)
                 param_json = sce_sys / "param.json"
                 game_root = sce_sys.parent
         if sce_sys.is_dir() and not param_json.is_file() and param_sfo.is_file():
@@ -673,6 +742,23 @@ class PkgExtractor:
             except Exception as e:
                 if log_fn:
                     log_fn("WARN", f"Could not auto-generate param.json from param.sfo: {e}")
+        elif not param_json.is_file():
+            try:
+                generated_json = {
+                    "titleId": meta.title_id or title_id,
+                    "titleName": meta.game_title or title_id,
+                    "localizedParameters": {
+                        "defaultLanguage": "en-US",
+                        "en-US": {
+                            "titleName": meta.game_title or title_id
+                        }
+                    }
+                }
+                param_json.write_text(json.dumps(generated_json, indent=2), encoding="utf-8")
+                if log_fn:
+                    log_fn("OK", f"Generated fallback sce_sys/param.json for {meta.title_id or title_id}")
+            except Exception:
+                pass
 
         return game_root
 

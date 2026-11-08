@@ -28,7 +28,10 @@ _MAX_PARAM_SIZE = 4 * 1024 * 1024
 _MAX_ICON_SIZE = 10 * 1024 * 1024
 _PKG_ENTRY_SIZE = 0x20
 _PKG_ENTRY_ID_PARAM_SFO = 0x1000
+_PKG_ENTRY_ID_PARAM_JSON = 0x2000
 _PKG_ENTRY_ID_ICON0_PNG = 0x1200
+_PKG_ENTRY_ID_PIC0_PNG = 0x1220
+_PKG_ENTRY_ID_PIC1_PNG = 0x1240
 _FFPKG_MAGIC = b"\x19\x01\x54\x19"
 _FFPKG_MAGIC_OFFSET = 0xFFEC
 _FFPKG_DIR_OFFSET = 0x38000
@@ -194,8 +197,8 @@ def _read_pkg_metadata(path: Path, meta: GameMetadata) -> GameMetadata:
             meta.package_type = _pkg_type_from_flags(flags)
             return meta
 
-        sfo_offset: int | None = None
-        sfo_size: int | None = None
+        param_offset: int | None = None
+        param_size: int | None = None
         icon_offset: int | None = None
         icon_size: int | None = None
         for index in range(entry_count):
@@ -203,16 +206,35 @@ def _read_pkg_metadata(path: Path, meta: GameMetadata) -> GameMetadata:
             entry_id = _read_u32be(fh, entry_base)
             data_offset = _read_u32be(fh, entry_base + 0x10)
             data_size = _read_u32be(fh, entry_base + 0x14)
-            if entry_id == _PKG_ENTRY_ID_PARAM_SFO:
-                sfo_offset, sfo_size = data_offset, data_size
+            if entry_id in (_PKG_ENTRY_ID_PARAM_SFO, _PKG_ENTRY_ID_PARAM_JSON):
+                param_offset, param_size = data_offset, data_size
             elif entry_id == _PKG_ENTRY_ID_ICON0_PNG:
                 icon_offset, icon_size = data_offset, data_size
-            if sfo_offset is not None and icon_offset is not None:
+            if param_offset is not None and icon_offset is not None:
                 break
 
-        if sfo_offset is not None and sfo_size is not None and 0 < sfo_size <= _MAX_PARAM_SIZE:
-            params = _parse_sfo(_read_at(fh, sfo_offset, sfo_size))
-            _fill_from_sfo_params(params, meta, default_package_type=_pkg_type_from_flags(flags))
+        if param_offset is not None and param_size is not None and 0 < param_size <= _MAX_PARAM_SIZE:
+            raw_param = _read_at(fh, param_offset, param_size)
+            if raw_param.startswith(b"\x00PSF"):
+                params = _parse_sfo(raw_param)
+                _fill_from_sfo_params(params, meta, default_package_type=_pkg_type_from_flags(flags))
+            else:
+                try:
+                    pjson = json.loads(raw_param.decode("utf-8", errors="ignore"))
+                    if isinstance(pjson, dict):
+                        meta.title_id = pjson.get("titleId", meta.title_id)
+                        meta.content_id = pjson.get("contentId", meta.content_id)
+                        meta.game_title = pjson.get("titleName", meta.game_title)
+                        loc = pjson.get("localizedParameters", {})
+                        if isinstance(loc, dict) and not meta.game_title:
+                            for loc_val in loc.values():
+                                if isinstance(loc_val, dict) and loc_val.get("titleName"):
+                                    meta.game_title = loc_val["titleName"]
+                                    break
+                        meta.version = pjson.get("contentVersion", pjson.get("appVersion", meta.version))
+                        meta.package_type = "PS5 PKG" if meta.title_id.startswith(("PPSA", "PUSA")) else "PKG"
+                except Exception:
+                    meta.package_type = _pkg_type_from_flags(flags)
         else:
             meta.package_type = _pkg_type_from_flags(flags)
 
