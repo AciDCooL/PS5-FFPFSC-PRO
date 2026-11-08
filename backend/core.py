@@ -431,24 +431,28 @@ class PkgExtractionError(RuntimeError):
 
 class PkgExtractor:
     EXTRACTOR_CANDIDATES = [
+        "shadpkg",
         "orbis-pub-cmd",
         "ps4-pkg-tool",
-        "shadpkg",
         "pkg_pfs_tool",
     ]
 
     @classmethod
     def locate_tool(cls) -> tuple[str, str] | None:
         """Return (tool_path, tool_type) or None if no extractor is available.
-        tool_type is one of: 'orbis-pub-cmd', 'ps4-pkg-tool', 'shadpkg', 'pkg_pfs_tool'.
+        tool_type is one of: 'shadpkg', 'orbis-pub-cmd', 'ps4-pkg-tool', 'pkg_pfs_tool'.
         """
+        _script_dir = Path(getattr(sys, "frozen", None) and sys.executable or __file__).resolve().parent
+        if _script_dir.name == "backend":
+            _script_dir = _script_dir.parent
+
         search_dirs = [
-            Path(__file__).resolve().parent.parent / "tools",
-            Path(__file__).resolve().parent / "tools",
+            _script_dir / "tools",
+            Path(getattr(sys, "_MEIPASS", "")) / "tools",
             APP_DIR / "tools",
         ]
 
-        exts = [".exe", ""] if sys.platform == "win32" else ["", ".exe"]
+        exts = [".exe", ""] if sys.platform == "win32" else ["", "-debian", "-macos", ".exe"]
 
         for name in cls.EXTRACTOR_CANDIDATES:
             for sdir in search_dirs:
@@ -462,6 +466,54 @@ class PkgExtractor:
                 return found, name
 
         return None
+
+    @classmethod
+    def download_shadpkg(cls, log_fn=None) -> bool:
+        """Attempt to auto-download shadpkg from official GitHub releases if missing."""
+        import urllib.request
+
+        if sys.platform == "win32":
+            asset_name = "shadpkg.exe"
+        elif sys.platform == "darwin":
+            asset_name = "shadpkg-macos"
+        else:
+            asset_name = "shadpkg-debian"
+
+        url = f"https://github.com/seregonwar/ShadPKG/releases/download/v2.1.0/{asset_name}"
+
+        _script_dir = Path(getattr(sys, "frozen", None) and sys.executable or __file__).resolve().parent
+        if _script_dir.name == "backend":
+            _script_dir = _script_dir.parent
+
+        dest_dirs = [
+            _script_dir / "tools",
+            APP_DIR / "tools",
+        ]
+
+        for d in dest_dirs:
+            try:
+                d.mkdir(parents=True, exist_ok=True)
+                dest_file = d / asset_name
+                if log_fn:
+                    log_fn("INFO", f"Downloading {asset_name} from GitHub ({url})...")
+                req = urllib.request.Request(url, headers={"User-Agent": "PS5-FFPFSC-PRO"})
+                with urllib.request.urlopen(req, timeout=30) as resp, open(dest_file, "wb") as f:
+                    shutil.copyfileobj(resp, f)
+
+                if sys.platform != "win32":
+                    try:
+                        os.chmod(dest_file, 0o755)
+                    except Exception:
+                        pass
+
+                if log_fn:
+                    log_fn("OK", f"Downloaded {asset_name} successfully to {dest_file}")
+                return True
+            except Exception as e:
+                if log_fn:
+                    log_fn("WARN", f"Could not download {asset_name} to {d}: {e}")
+
+        return False
 
     @classmethod
     def extract(cls, pkg_path: Path, dest_root: Path, log_fn=None, progress_fn=None,
@@ -486,10 +538,19 @@ class PkgExtractor:
 
         tool_info = cls.locate_tool()
         if not tool_info:
-            tools_dir = Path(__file__).resolve().parent.parent / "tools"
+            if log_fn:
+                log_fn("INFO", "PKG extractor not found locally. Attempting automatic download of shadpkg...")
+            if cls.download_shadpkg(log_fn=log_fn):
+                tool_info = cls.locate_tool()
+
+        if not tool_info:
+            _script_dir = Path(getattr(sys, "frozen", None) and sys.executable or __file__).resolve().parent
+            if _script_dir.name == "backend":
+                _script_dir = _script_dir.parent
+            tools_dir = _script_dir / "tools"
             raise PkgExtractorNotFoundError(
                 f"PS4 PKG extraction requires an external extraction utility.\n\n"
-                f"Please place 'orbis-pub-cmd.exe', 'ps4-pkg-tool.exe', or 'shadpkg.exe' "
+                f"Please place 'shadpkg.exe', 'orbis-pub-cmd.exe', or 'ps4-pkg-tool.exe' "
                 f"into the tools directory:\n{tools_dir}\n\n"
                 f"or install it on your system PATH."
             )
@@ -567,6 +628,14 @@ class PkgExtractor:
         sce_sys = game_root / "sce_sys"
         param_json = sce_sys / "param.json"
         param_sfo = sce_sys / "param.sfo"
+
+        if not param_sfo.is_file():
+            found_sfos = list(game_root.rglob("param.sfo"))
+            if found_sfos:
+                param_sfo = found_sfos[0]
+                sce_sys = param_sfo.parent
+                param_json = sce_sys / "param.json"
+                game_root = sce_sys.parent
         if sce_sys.is_dir() and not param_json.is_file() and param_sfo.is_file():
             try:
                 sfo_data = _parse_sfo(param_sfo.read_bytes())
