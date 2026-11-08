@@ -139,6 +139,55 @@ class TestPkgExtraction(unittest.TestCase):
             self.assertIn("--passcode", cmd)
             self.assertIn("00000000000000000000000000000000", cmd)
 
+    def test_live_prospero_pkg_end_to_end(self):
+        """End-to-end test creating and extracting a real PS5 FPKG via ProsperoPkgTool."""
+        tool_info = PkgExtractor.locate_tool(is_ps5=True)
+        if not tool_info or "prospero" not in tool_info[1].lower():
+            self.skipTest("ProsperoPkgTool binary not available for live extraction test.")
+
+        tool_path, _ = tool_info
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            src_dir = tmp_path / "game_src"
+            (src_dir / "sce_sys").mkdir(parents=True, exist_ok=True)
+            (src_dir / "eboot.bin").write_bytes(b"\x7fELF" + b"\x00" * 60)
+            (src_dir / "sce_sys" / "param.json").write_text(
+                json.dumps({
+                    "titleId": "PPSA18463",
+                    "titleName": "Baldur's Gate 3",
+                    "contentId": "HP0000-PPSA18463_00-0000000000000000"
+                }),
+                encoding="utf-8"
+            )
+
+            pkg_path = tmp_path / "test_ps5.pkg"
+            import subprocess
+            res = subprocess.run(
+                [tool_path, "img_create", str(src_dir), "--out", str(pkg_path),
+                 "--passcode", "00000000000000000000000000000000", "--no_fself"],
+                capture_output=True, text=True
+            )
+            self.assertEqual(res.returncode, 0, f"img_create failed: {res.stderr or res.stdout}")
+            self.assertTrue(pkg_path.is_file())
+
+            # 1. Test metadata parsing from real PS5 FIH package
+            meta = read_game_metadata(pkg_path)
+            self.assertEqual(meta.title_id, "PPSA18463")
+            self.assertEqual(meta.game_title, "Baldur's Gate 3")
+            self.assertEqual(meta.package_type, "PS5 PKG")
+
+            # 2. Test full extraction via PkgExtractor
+            dest_root = tmp_path / "out"
+            extracted_game = PkgExtractor.extract(pkg_path, dest_root)
+            self.assertTrue(extracted_game.is_dir())
+            self.assertTrue((extracted_game / "eboot.bin").is_file())
+            self.assertTrue((extracted_game / "sce_sys" / "param.json").is_file())
+
+            # Verify param.json matches
+            extracted_json = json.loads((extracted_game / "sce_sys" / "param.json").read_text(encoding="utf-8"))
+            self.assertEqual(extracted_json["titleId"], "PPSA18463")
+            self.assertEqual(extracted_json["titleName"], "Baldur's Gate 3")
+
 
 if __name__ == "__main__":
     unittest.main()

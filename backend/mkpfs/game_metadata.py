@@ -180,21 +180,31 @@ def _read_pkg_metadata(path: Path, meta: GameMetadata) -> GameMetadata:
     meta.package_type = "PKG"
     with path.open("rb") as fh:
         magic = _read_at(fh, 0, 4)
+        cnt_offset = 0
+        if magic == b"\x7fFIH":
+            meta.package_type = "PS5 PKG"
+            cnt_offset = _read_u64le(fh, 0x58)
+            if cnt_offset == 0 or cnt_offset > 500 * 1024 * 1024 * 1024:
+                pfs_off = _read_u64le(fh, 0x10)
+                pfs_sz = _read_u64le(fh, 0x18)
+                cnt_offset = pfs_off + pfs_sz
+            magic = _read_at(fh, cnt_offset, 4)
+
         if magic != b"\x7fCNT":
             meta.package_type = "UNKNOWN"
             return meta
 
-        content_id = _read_at(fh, 0x40, 48).decode("ascii", errors="ignore").rstrip("\0").strip()
+        content_id = _read_at(fh, cnt_offset + 0x40, 48).decode("ascii", errors="ignore").rstrip("\0").strip()
         if content_id:
             meta.content_id = content_id
             meta.title_id = _title_id_from_content_id(content_id) or meta.title_id
             meta.region = detect_region_from_content_id(content_id)
 
-        entry_count = _read_u32be(fh, 0x10)
-        entry_table_offset = _read_u32be(fh, 0x18)
-        flags = _read_u32be(fh, 0x04)
-        if entry_count == 0 or entry_count > 4096 or entry_table_offset == 0:
-            meta.package_type = _pkg_type_from_flags(flags)
+        entry_count = _read_u32be(fh, cnt_offset + 0x10)
+        entry_table_offset = cnt_offset + _read_u32be(fh, cnt_offset + 0x18)
+        flags = _read_u32be(fh, cnt_offset + 0x04)
+        if entry_count == 0 or entry_count > 4096 or entry_table_offset == cnt_offset:
+            meta.package_type = "PS5 PKG" if meta.title_id.startswith(("PPSA", "PUSA")) else _pkg_type_from_flags(flags)
             return meta
 
         param_offset: int | None = None
@@ -204,7 +214,7 @@ def _read_pkg_metadata(path: Path, meta: GameMetadata) -> GameMetadata:
         for index in range(entry_count):
             entry_base = entry_table_offset + index * _PKG_ENTRY_SIZE
             entry_id = _read_u32be(fh, entry_base)
-            data_offset = _read_u32be(fh, entry_base + 0x10)
+            data_offset = cnt_offset + _read_u32be(fh, entry_base + 0x10)
             data_size = _read_u32be(fh, entry_base + 0x14)
             if entry_id in (_PKG_ENTRY_ID_PARAM_SFO, _PKG_ENTRY_ID_PARAM_JSON):
                 param_offset, param_size = data_offset, data_size
@@ -597,6 +607,11 @@ def _read_at(fh: BinaryIO, offset: int, size: int) -> bytes:
 def _read_u32be(fh: BinaryIO, offset: int) -> int:
     data = _read_at(fh, offset, 4)
     return struct.unpack(">I", data)[0] if len(data) == 4 else 0
+
+
+def _read_u64le(fh: BinaryIO, offset: int) -> int:
+    data = _read_at(fh, offset, 8)
+    return struct.unpack("<Q", data)[0] if len(data) == 8 else 0
 
 
 def _le32(data: bytes, offset: int) -> int:

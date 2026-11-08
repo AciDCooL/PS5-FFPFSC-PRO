@@ -1651,13 +1651,27 @@ class PkgExtractor:
             sce_sys_dir.mkdir(parents=True, exist_ok=True)
             with open(pkg_path, "rb") as fh:
                 magic = fh.read(4)
+                cnt_offset = 0
+                if magic == b"\x7fFIH":
+                    fh.seek(0x58)
+                    cnt_offset = int.from_bytes(fh.read(8), "little")
+                    if cnt_offset == 0 or cnt_offset > 500 * 1024 * 1024 * 1024:
+                        fh.seek(0x10)
+                        pfs_off = int.from_bytes(fh.read(8), "little")
+                        fh.seek(0x18)
+                        pfs_sz = int.from_bytes(fh.read(8), "little")
+                        cnt_offset = pfs_off + pfs_sz
+                    fh.seek(cnt_offset)
+                    magic = fh.read(4)
+
                 if magic != b"\x7fCNT":
                     return
-                fh.seek(0x10)
+
+                fh.seek(cnt_offset + 0x10)
                 entry_count = int.from_bytes(fh.read(4), "big")
-                fh.seek(0x18)
-                entry_table_offset = int.from_bytes(fh.read(4), "big")
-                if entry_count == 0 or entry_count > 4096 or entry_table_offset == 0:
+                fh.seek(cnt_offset + 0x18)
+                entry_table_offset = cnt_offset + int.from_bytes(fh.read(4), "big")
+                if entry_count == 0 or entry_count > 4096 or entry_table_offset == cnt_offset:
                     return
 
                 for index in range(entry_count):
@@ -1665,7 +1679,7 @@ class PkgExtractor:
                     fh.seek(entry_base)
                     entry_id = int.from_bytes(fh.read(4), "big")
                     fh.seek(entry_base + 0x10)
-                    data_offset = int.from_bytes(fh.read(4), "big")
+                    data_offset = cnt_offset + int.from_bytes(fh.read(4), "big")
                     data_size = int.from_bytes(fh.read(4), "big")
 
                     if data_size == 0 or data_size > 10 * 1024 * 1024:
@@ -1758,7 +1772,7 @@ class PkgExtractor:
 
         meta = read_game_metadata(pkg_path)
         title_id = meta.title_id if (meta.title_id and meta.title_id != "—") else pkg_path.stem
-        is_ps5 = title_id.startswith(("PPSA", "PUSA"))
+        is_ps5 = title_id.startswith(("PPSA", "PUSA")) or meta.package_type == "PS5 PKG"
 
         tool_info = cls.locate_tool(is_ps5=is_ps5)
         if not tool_info:
