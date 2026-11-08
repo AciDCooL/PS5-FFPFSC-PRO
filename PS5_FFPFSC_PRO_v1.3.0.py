@@ -3116,6 +3116,9 @@ class App:
         self._active_extract_proc: subprocess.Popen | None = None
         self._active_extract_dest: Path | None = None
         self._is_extracting: bool = False
+        self.is_paused: bool = False
+        self._pause_start_time: float = 0.0
+        self._total_paused_duration: float = 0.0
 
     def _show_first_run_wizard(self):
         wiz = FirstRunWizard(self.root)
@@ -3168,18 +3171,21 @@ class App:
         ctk.CTkLabel(header, textvariable=self.header_status_var,
                       text_color=MUTED, font=ctk.CTkFont(size=14)).grid(row=0, column=2, padx=12)
 
-        # START / CANCEL always visible in header
-        self.start_btn = self._button(header, "▶  START QUEUE", self.start, green=True, width=150, height=36)
+        # START / PAUSE / CANCEL always visible in header
+        self.start_btn = self._button(header, "▶  START QUEUE", self.start, green=True, width=140, height=36)
         self.start_btn.grid(row=0, column=3, rowspan=1, padx=(0, 6), pady=2, sticky="e")
-        self.cancel_btn = self._button(header, "✕  CANCEL", self.cancel, red=True, width=120, height=36)
-        self.cancel_btn.grid(row=0, column=4, padx=(0, 6), pady=2, sticky="e")
+        self.pause_btn = self._button(header, "⏸  PAUSE", self.toggle_pause, yellow=True, width=110, height=36)
+        self.pause_btn.grid(row=0, column=4, padx=(0, 6), pady=2, sticky="e")
+        self.pause_btn.configure(state="disabled", fg_color=CARD2, text_color=WHITE)
+        self.cancel_btn = self._button(header, "✕  CANCEL", self.cancel, red=True, width=110, height=36)
+        self.cancel_btn.grid(row=0, column=5, padx=(0, 6), pady=2, sticky="e")
         self.cancel_btn.configure(state="disabled")
 
-        self._button(header, "☀ Light / 🌙 Dark", self._toggle_theme, width=150).grid(row=1, column=2, padx=12, sticky="e")
-        self._compact_btn = self._button(header, "⊡  Compact", self._toggle_compact, width=90)
-        self._compact_btn.grid(row=1, column=3, padx=(0, 4), sticky="e")
-        self._settings_btn = self._button(header, "⚙  Options & Settings", self.open_settings, width=150)
-        self._settings_btn.grid(row=1, column=4, padx=(0, 4), sticky="e")
+        self._button(header, "☀ Light / 🌙 Dark", self._toggle_theme, width=140).grid(row=1, column=3, padx=(0, 6), sticky="e")
+        self._compact_btn = self._button(header, "⊡  Compact", self._toggle_compact, width=110)
+        self._compact_btn.grid(row=1, column=4, padx=(0, 6), sticky="e")
+        self._settings_btn = self._button(header, "⚙  Options & Settings", self.open_settings, width=110)
+        self._settings_btn.grid(row=1, column=5, padx=(0, 6), sticky="e")
 
         # ── Variables ────────────────────────────────────────────────────────
         settings = getattr(self, "settings", None) or load_settings()
@@ -5083,8 +5089,7 @@ v1.0
 
         item.status = "Extracting"
         self.update_queue_box()
-        self.start_btn.configure(state="disabled")
-        self.cancel_btn.configure(state="normal")
+        self._set_ui_running(True)
 
         is_pkg = archive.suffix.lower() == ".pkg"
         label = "PKG" if is_pkg else "archive"
@@ -5483,8 +5488,7 @@ v1.0
         """Start the next game in the queue — rechecks disk space before each game."""
         if not self.queue:
             self._batch_running = False
-            self.start_btn.configure(state="normal")
-            self.cancel_btn.configure(state="disabled")
+            self._set_ui_running(False)
             self._queue_start_time = 0.0
             self._last_speed_bps = 0.0
             self._update_batch_counter()
@@ -5530,15 +5534,13 @@ v1.0
                 self.root.after(800, self._batch_auto_start)
             else:
                 self._batch_running = False
-                self.start_btn.configure(state="normal")
-                self.cancel_btn.configure(state="disabled")
+                self._set_ui_running(False)
                 self._update_batch_counter()
                 self._show_batch_complete()
             return
         item.status = "Running"
         self.update_queue_box()
-        self.start_btn.configure(state="disabled")
-        self.cancel_btn.configure(state="normal")
+        self._set_ui_running(True)
         current = self._batch_done + self._batch_failed + 1
         self._update_batch_counter()
         self.header_status_var.set(
@@ -5966,14 +5968,111 @@ v1.0
         self.cancel_requested = False
         item.status = "Running"
         self.update_queue_box()
-        self.start_btn.configure(state="disabled")
-        self.cancel_btn.configure(state="normal")
+        self._set_ui_running(True)
         label = f"Game 1/{self._batch_total}" if self._batch_total > 1 else "Starting"
         self.status_update(label, "Launching backend.", "Starting", 0, 0, "00:00", "—", "—")
         self.worker = CLIWorker(self, item, cmd, cwd, out_dir, temp_dir)
         self.worker.start()
 
+    def _set_ui_running(self, running: bool):
+        if running:
+            self.start_btn.configure(state="disabled")
+            self.pause_btn.configure(state="normal", text="⏸  PAUSE", fg_color=YELLOW, hover_color=("#a37c10", "#c9a00e"), text_color="#061006")
+            self.cancel_btn.configure(state="normal")
+        else:
+            self.start_btn.configure(state="normal")
+            self.pause_btn.configure(state="disabled", text="⏸  PAUSE", fg_color=CARD2, hover_color=("#b0b0b0", "#2a2a2a"), text_color=WHITE)
+            self.cancel_btn.configure(state="disabled")
+            self.is_paused = False
+
+    def toggle_pause(self):
+        if not self.is_paused:
+            self.pause_job()
+        else:
+            self.resume_job()
+
+    def pause_job(self):
+        if self.is_paused:
+            return
+        proc = self.current_process or self._active_extract_proc or (getattr(self.worker, "proc", None) if getattr(self, "worker", None) else None)
+        if not proc or proc.poll() is not None:
+            self.log("WARN", "No active compression or extraction process to pause.")
+            return
+
+        try:
+            from backend.process_control import suspend_process_tree
+            if suspend_process_tree(proc.pid):
+                self.is_paused = True
+                self._pause_start_time = time.time()
+                self.pause_btn.configure(text="▶  RESUME", fg_color=GREEN, hover_color=GREEN2, text_color="#061006")
+                self.header_status_var.set("⏸ Paused (Standby Safe)")
+                cur_stage = self.stage_var.get() if hasattr(self, "stage_var") else "Paused"
+                self.status_update("Paused", "Job paused by user (Process suspended — safe for PC Standby).", "Paused",
+                                   self.overall_bar.get() * 100 if hasattr(self.overall_bar, "get") else 0,
+                                   self.stage_bar.get() * 100 if hasattr(self.stage_bar, "get") else 0,
+                                   self.elapsed_var.get().replace("Elapsed: ", ""), "—", "—")
+                self.log("INFO", "⏸ Job paused. Process suspended at OS kernel level — zero I/O and zero CPU. Safe to put PC into sleep / standby.")
+            else:
+                self.log("ERROR", "Failed to pause active process.")
+        except Exception as e:
+            self.log("ERROR", f"Error pausing process: {e}")
+
+    def resume_job(self):
+        if not self.is_paused:
+            return
+        proc = self.current_process or self._active_extract_proc or (getattr(self.worker, "proc", None) if getattr(self, "worker", None) else None)
+        if not proc or proc.poll() is not None:
+            self._set_ui_running(False)
+            self.log("WARN", "Active process was already terminated.")
+            return
+
+        try:
+            from backend.process_control import resume_process_tree, check_storage_accessible
+            # Check storage reachability before waking process to prevent [WinError 64]
+            paths_to_check = [self.output_var.get().strip(), self.temp_var.get().strip()]
+            if self.queue:
+                item = self.queue[0]
+                if getattr(item, "path", None):
+                    paths_to_check.append(item.path)
+                elif getattr(item, "archive_path", None):
+                    paths_to_check.append(item.archive_path)
+
+            self.header_status_var.set("Checking storage...")
+            ok, unreachable = check_storage_accessible(paths_to_check, timeout=3.0)
+            if not ok:
+                self.header_status_var.set("⚠️ Storage not ready")
+                self.log("WARN", f"⚠️ Storage path is not accessible yet: {unreachable}. If your PC just woke from sleep, please wait a few seconds for network/USB storage to reconnect, then click Resume again.")
+                messagebox.showwarning(
+                    "Storage Not Ready",
+                    f"The following storage path is not reachable yet:\n\n{unreachable}\n\n"
+                    f"If your PC just returned from standby, please wait a few seconds for Windows to reconnect to your network drive / NAS, then click Resume again."
+                )
+                return
+
+            if resume_process_tree(proc.pid):
+                if self._pause_start_time > 0:
+                    self._total_paused_duration += (time.time() - self._pause_start_time)
+                    self._pause_start_time = 0.0
+                self.is_paused = False
+                self.pause_btn.configure(text="⏸  PAUSE", fg_color=YELLOW, hover_color=("#a37c10", "#c9a00e"), text_color="#061006")
+                self.header_status_var.set(f"v{APP_VERSION}  |  Running")
+                self.log("OK", "▶ Job resumed. Continuing compression/extraction.")
+            else:
+                self.log("ERROR", "Failed to resume active process.")
+        except Exception as e:
+            self.log("ERROR", f"Error resuming process: {e}")
+
     def cancel(self):
+        if getattr(self, "is_paused", False):
+            try:
+                proc = self.current_process or self._active_extract_proc or (getattr(self.worker, "proc", None) if getattr(self, "worker", None) else None)
+                if proc and proc.pid:
+                    from backend.process_control import resume_process_tree
+                    resume_process_tree(proc.pid)
+            except Exception:
+                pass
+            self.is_paused = False
+
         self.cancel_requested = True
         self._queue_start_time = 0.0
         self._last_speed_bps = 0.0
@@ -6916,9 +7015,12 @@ v1.0
     def _tick_elapsed(self):
         """Called every poll cycle while a worker is live — keeps elapsed ticking
         regardless of whether the backend is printing anything."""
+        if getattr(self, "is_paused", False):
+            return
         w = getattr(self, "worker", None)
         if w and w.is_alive() and w.start_time:
-            self.elapsed_var.set(f"Elapsed: {format_duration(time.time() - w.start_time)}")
+            eff_elapsed = max(0.0, time.time() - w.start_time - getattr(self, "_total_paused_duration", 0.0))
+            self.elapsed_var.set(f"Elapsed: {format_duration(eff_elapsed)}")
 
     def _update_ram_meter(self):
         try:
@@ -7176,8 +7278,7 @@ v1.0
                     cancelled_item.status = "Cancelled"
                 self._batch_running = False
                 self.cancel_requested = False
-                self.start_btn.configure(state="normal")
-                self.cancel_btn.configure(state="disabled")
+                self._set_ui_running(False)
                 self._queue_start_time = 0.0
                 self._last_speed_bps = 0.0
                 self.queue_eta_var.set("")
@@ -7217,8 +7318,7 @@ v1.0
                     self.root.after(800, self._batch_auto_start)
                 else:
                     self._batch_running = False
-                    self.start_btn.configure(state="normal")
-                    self.cancel_btn.configure(state="disabled")
+                    self._set_ui_running(False)
                     self._queue_start_time = 0.0
                     self._last_speed_bps = 0.0
                     self.queue_eta_var.set("")
@@ -7271,8 +7371,7 @@ v1.0
                     self.root.after(600, self._batch_auto_start)
                 else:
                     self._batch_running = False
-                    self.start_btn.configure(state="normal")
-                    self.cancel_btn.configure(state="disabled")
+                    self._set_ui_running(False)
                     self._queue_start_time = 0.0
                     self._last_speed_bps = 0.0
                     self.queue_eta_var.set("")
@@ -7330,8 +7429,7 @@ v1.0
                     self.root.after(800, self._batch_auto_start)
                 else:
                     self._batch_running = False
-                    self.start_btn.configure(state="normal")
-                    self.cancel_btn.configure(state="disabled")
+                    self._set_ui_running(False)
                     self.update_queue_box()
                     self._update_batch_counter()
                     if self._batch_total > 1:

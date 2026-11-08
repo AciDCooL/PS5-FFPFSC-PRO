@@ -87,6 +87,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       color: var(--text-muted);
     }
     .badge-green { border-color: var(--green); color: var(--green); }
+    .badge-yellow { border-color: #eab308; color: #eab308; }
     .header-actions { display: flex; align-items: center; gap: 10px; }
     .btn {
       display: inline-flex;
@@ -107,6 +108,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     .btn-green { background: var(--green); color: #051408; border: none; }
     .btn-green:hover { background: #16a34a; }
     .btn-green:disabled { background: #2f4534; color: #77887b; cursor: not-allowed; }
+    .btn-yellow { background: #eab308; color: #1c1503; border: none; }
+    .btn-yellow:hover { background: #ca8a04; }
+    .btn-yellow:disabled { background: #4a3e1b; color: #887d60; cursor: not-allowed; }
     .btn-red { background: var(--red); color: #fff; border: none; }
     .btn-red:hover { background: var(--red-dark); }
     .btn-red:disabled { background: #4a2020; color: #886060; cursor: not-allowed; }
@@ -316,6 +320,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     </div>
     <div class="header-actions">
       <button class="btn btn-green" id="startBtn" onclick="startQueue()">▶ Start Queue</button>
+      <button class="btn btn-yellow" id="pauseBtn" onclick="togglePauseQueue()" disabled>⏸ Pause</button>
       <button class="btn btn-red" id="cancelBtn" onclick="cancelQueue()" disabled>✕ Cancel</button>
       <button class="btn" onclick="openSettingsModal()">⚙ Settings</button>
       <a class="btn" href="__COMMUNITY_SHEET_URL__" target="_blank" rel="noopener">🌐 Compat DB</a>
@@ -604,6 +609,24 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
     function renderStatus(st) {
       document.getElementById('startBtn').disabled = st.is_running;
+      const pauseBtn = document.getElementById('pauseBtn');
+      pauseBtn.disabled = !st.is_running;
+      if (st.is_paused) {
+        pauseBtn.innerText = '▶ Resume';
+        pauseBtn.className = 'btn btn-green';
+        document.getElementById('backendBadge').className = 'badge badge-yellow';
+        document.getElementById('backendBadge').innerText = 'Paused';
+      } else {
+        pauseBtn.innerText = '⏸ Pause';
+        pauseBtn.className = 'btn btn-yellow';
+        if (st.is_running) {
+          document.getElementById('backendBadge').className = 'badge badge-green';
+          document.getElementById('backendBadge').innerText = 'Running';
+        } else {
+          document.getElementById('backendBadge').className = 'badge badge-green';
+          document.getElementById('backendBadge').innerText = 'Ready';
+        }
+      }
       document.getElementById('cancelBtn').disabled = !st.is_running;
       document.getElementById('overallPctVal').innerText = st.overall_pct + '%';
       document.getElementById('overallBar').style.width = st.overall_pct + '%';
@@ -722,6 +745,29 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       const res = await fetch('/api/queue/start', {method: 'POST'});
       const data = await res.json();
       if (!data.ok) alert(data.error);
+      loadStatus();
+    }
+
+    async function togglePauseQueue() {
+      const btn = document.getElementById('pauseBtn');
+      if (btn.innerText.includes('Resume')) {
+        await resumeQueue();
+      } else {
+        await pauseQueue();
+      }
+    }
+
+    async function pauseQueue() {
+      const res = await fetch('/api/queue/pause', {method: 'POST'});
+      const data = await res.json();
+      if (!data.ok) alert(data.error || data.message);
+      loadStatus();
+    }
+
+    async function resumeQueue() {
+      const res = await fetch('/api/queue/resume', {method: 'POST'});
+      const data = await res.json();
+      if (!data.ok) alert(data.error || data.message);
       loadStatus();
     }
 
@@ -1097,6 +1143,16 @@ class WebHandler(BaseHTTPRequestHandler):
 
         if path == "/api/queue/start":
             ok, msg = engine.start_queue()
+            self._send_json({"ok": ok, "message": msg, "error": None if ok else msg}, status=200 if ok else 400)
+            return
+
+        if path == "/api/queue/pause":
+            ok, msg = engine.pause_queue()
+            self._send_json({"ok": ok, "message": msg, "error": None if ok else msg}, status=200 if ok else 400)
+            return
+
+        if path == "/api/queue/resume":
+            ok, msg = engine.resume_queue()
             self._send_json({"ok": ok, "message": msg, "error": None if ok else msg}, status=200 if ok else 400)
             return
 

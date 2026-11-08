@@ -1328,7 +1328,8 @@ class CoreProcessWorker(threading.Thread):
                     w_start, w_end = STAGE_WEIGHTS.get(stage, (0, 100))
                     overall_pct = max(0.0, min(100.0, w_start + (pct / 100.0) * (w_end - w_start)))
 
-                    elapsed = format_duration(time.time() - self.start_time)
+                    eff_elapsed = max(0.0, time.time() - self.start_time - getattr(self.engine, "_total_paused_duration", 0.0))
+                    elapsed = format_duration(eff_elapsed)
                     self.engine.status_update(stage, clean, stage, pct, overall_pct, elapsed, self.speed, eta)
 
                     # Log progress at 10% boundaries or 100%
@@ -1406,9 +1407,13 @@ class QueueEngine:
             "batch_done": 0,
             "batch_failed": 0,
             "is_running": False,
+            "is_paused": False,
             "active_game": None,
         }
 
+        self.is_paused: bool = False
+        self._pause_start_time: float = 0.0
+        self._total_paused_duration: float = 0.0
         self.logs: deque[dict] = deque(maxlen=1500)
         self.event_subscribers: list[queue.Queue] = []
         self._active_extract_proc: subprocess.Popen | None = None
@@ -1570,6 +1575,9 @@ class QueueEngine:
                 return False, "No default output folder configured. Set one in Settings."
 
             self.is_running = True
+            self.is_paused = False
+            self._pause_start_time = 0.0
+            self._total_paused_duration = 0.0
             self.cancel_requested = False
             self._batch_total = len(self.queue)
             self._batch_done = 0
@@ -1589,6 +1597,9 @@ class QueueEngine:
 
             item = self.queue[0]
             settings = load_settings()
+            self.is_paused = False
+            self._pause_start_time = 0.0
+            self._total_paused_duration = 0.0
 
         item.status = "Running"
         self._emit("queue", self.get_queue())
@@ -1703,6 +1714,9 @@ class QueueEngine:
     def _finish_batch(self):
         with self._lock:
             self.is_running = False
+            self.is_paused = False
+            self._pause_start_time = 0.0
+            self._total_paused_duration = 0.0
             self.cancel_requested = False
             self.active_worker = None
             self._queue_start_time = 0.0
@@ -1719,15 +1733,103 @@ class QueueEngine:
                 "game_eta": "—",
                 "queue_eta": "—",
                 "is_running": False,
+                "is_paused": False,
                 "active_game": None,
             })
         self._emit("status", self.status)
         self.log("INFO", f"🏁 Queue finished. Succeeded: {done}, Failed: {failed}")
 
+    def pause_queue(self) -> tuple[bool, str]:
+        with self._lock:
+            if not self.is_running:
+                return False, "Queue is not running."
+            if self.is_paused:
+                return False, "Queue is already paused."
+
+            proc = self._active_extract_proc or (self.active_worker.proc if self.active_worker else None)
+            if not proc or proc.poll() is not None:
+                return False, "No active worker process found to pause."
+
+            try:
+                from backend.process_control import suspend_process_tree
+                if suspend_process_tree(proc.pid):
+                    self.is_paused = True
+                    self._pause_start_time = time.time()
+                    self.status["is_paused"] = True
+                    self._emit("status", self.status)
+                    self.log("WARN", "⏸ Job paused. Worker process suspended (CPU and network I/O halted).")
+                    return True, "Queue paused."
+                else:
+                    return False, "Failed to suspend active process tree."
+            except Exception as e:
+                return False, f"Failed to pause: {e}"
+
+    def resume_queue(self) -> tuple[bool, str]:
+        with self._lock:
+            if not self.is_running:
+                return False, "Queue is not running."
+            if not self.is_paused:
+                return False, "Queue is not paused."
+
+            proc = self._active_extract_proc or (self.active_worker.proc if self.active_worker else None)
+            if not proc or proc.poll() is not None:
+                self.is_paused = False
+                self.status["is_paused"] = False
+                return False, "Active process no longer exists."
+
+            # Verify storage accessibility before waking process
+            settings = load_settings()
+            paths_to_check = []
+            if self.queue:
+                cur = self.queue[0]
+                if cur.path:
+                    paths_to_check.append(cur.path)
+                if cur.archive_path:
+                    paths_to_check.append(cur.archive_path)
+            out_folder = settings.get("output_folder", "")
+            if out_folder:
+                paths_to_check.append(out_folder)
+            temp_folder = settings.get("temp_folder", "")
+            if temp_folder:
+                paths_to_check.append(temp_folder)
+
+            from backend.process_control import check_storage_accessible, resume_process_tree
+            ok, unreachable = check_storage_accessible(paths_to_check, timeout=3.0)
+            if not ok:
+                self.log("WARN", f"⚠️ Storage path is not accessible yet: {unreachable}. If your PC just woke from standby, wait a few seconds and try resuming again.")
+                return False, f"Storage path not accessible yet: {unreachable}. Please wait for network/storage drives to reconnect."
+
+            try:
+                if resume_process_tree(proc.pid):
+                    if self._pause_start_time > 0:
+                        self._total_paused_duration += (time.time() - self._pause_start_time)
+                        self._pause_start_time = 0.0
+                    self.is_paused = False
+                    self.status["is_paused"] = False
+                    self._emit("status", self.status)
+                    self.log("OK", "▶ Job resumed. Continuing compression/extraction.")
+                    return True, "Queue resumed."
+                else:
+                    return False, "Failed to resume active process tree."
+            except Exception as e:
+                return False, f"Failed to resume: {e}"
+
     def cancel_queue(self) -> tuple[bool, str]:
         with self._lock:
             if not self.is_running and not self.active_worker and not self._active_extract_proc:
                 return False, "Queue is not running."
+
+            if self.is_paused:
+                try:
+                    proc = self._active_extract_proc or (self.active_worker.proc if self.active_worker else None)
+                    if proc and proc.pid:
+                        from backend.process_control import resume_process_tree
+                        resume_process_tree(proc.pid)
+                except Exception:
+                    pass
+                self.is_paused = False
+                self.status["is_paused"] = False
+
             self.cancel_requested = True
             self.log("WARN", "Cancellation requested by user.")
             if self._active_extract_proc and self._active_extract_proc.poll() is None:
